@@ -8,6 +8,25 @@ dependencies = [
     "anthropic>=0.117.0",
     "manim>=0.20.1",
     "pydantic>=2.13.4",
+    "pyinstaller>=6.21.0",
     "pymunk>=7.3.0",
     "requests>=2.34.2",
 ]
+
+[project.scripts]
+prompt-animator = "main:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+    "engines",
+    "llm",
+    "llm.providers",
+    "render",
+    "schema",
+    "timeline",
+]
+py-modules = ["main"]
