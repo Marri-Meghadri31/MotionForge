@@ -1,0 +1,4 @@
+pydantic>=2.0
+pymunk>=6.6
+manim>=0.18
+anthropic>=0.40
