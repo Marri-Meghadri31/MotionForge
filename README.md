@@ -38,6 +38,13 @@ When `--secret` is omitted, MotionForge generates one and prints a single JSON `
 Contract v1 routes:
 
 ```text
+POST   /v1/visualizations
+GET    /v1/visualizations/:id
+GET    /v1/visualizations/:id/timeline
+POST   /v1/visualizations/:id/parameters
+POST   /v1/visualizations/:id/exports
+DELETE /v1/visualizations/:id
+GET    /v1/visualizations/:id/events
 POST   /v1/scenes/compile
 POST   /v1/simulations
 POST   /v1/exports
@@ -47,7 +54,7 @@ DELETE /v1/jobs/:id
 GET    /v1/health
 ```
 
-Use either `Authorization: Bearer <secret>` or `X-MotionForge-Secret`. Compile, simulation, and export are independent durable jobs. `GET .../events` is an SSE stream; polling `GET /v1/jobs/:id` is also supported.
+Use either `Authorization: Bearer <secret>` or `X-MotionForge-Secret`. The visualization routes provide the UI-oriented compile-to-timeline lifecycle under one stable visualization ID. The lower-level compile, simulation, and export routes remain available as independent durable jobs. `GET .../events` is an SSE stream; polling the visualization or job resource is also supported.
 
 See [Velo integration](docs/velo-integration.md) for the request sequence and Canvas coordinate contract.
 

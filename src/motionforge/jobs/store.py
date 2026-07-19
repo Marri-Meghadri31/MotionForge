@@ -61,6 +61,22 @@ class JobStore:
                 );
                 CREATE INDEX IF NOT EXISTS job_events_job_id_sequence
                     ON job_events(job_id, sequence);
+                CREATE TABLE IF NOT EXISTS visualizations (
+                    visualization_id TEXT PRIMARY KEY,
+                    compile_request_json TEXT NOT NULL,
+                    simulation_options_json TEXT NOT NULL,
+                    current_job_id TEXT NOT NULL REFERENCES jobs(job_id),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS visualization_jobs (
+                    visualization_id TEXT NOT NULL REFERENCES visualizations(visualization_id) ON DELETE CASCADE,
+                    job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    PRIMARY KEY (visualization_id, job_id)
+                );
+                CREATE INDEX IF NOT EXISTS visualization_jobs_visualization_id
+                    ON visualization_jobs(visualization_id);
                 """
             )
 
@@ -168,6 +184,103 @@ class JobStore:
             rows = connection.execute(
                 "SELECT sequence, payload_json FROM job_events WHERE job_id=? AND sequence>? ORDER BY sequence",
                 (job_id, after),
+            ).fetchall()
+        return [(row["sequence"], json.loads(row["payload_json"])) for row in rows]
+
+    def create_visualization(
+        self,
+        visualization_id: str,
+        compile_request: dict[str, Any],
+        simulation_options: dict[str, Any],
+        job_id: str,
+    ) -> None:
+        now = utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """INSERT INTO visualizations
+                (visualization_id, compile_request_json, simulation_options_json, current_job_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    visualization_id,
+                    json.dumps(compile_request, ensure_ascii=False),
+                    json.dumps(simulation_options, ensure_ascii=False),
+                    job_id,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO visualization_jobs(visualization_id, job_id, role) VALUES (?, ?, 'visualization')",
+                (visualization_id, job_id),
+            )
+
+    def replace_visualization_job(
+        self,
+        visualization_id: str,
+        compile_request: dict[str, Any],
+        simulation_options: dict[str, Any],
+        job_id: str,
+    ) -> None:
+        with self._lock, self._connection() as connection:
+            cursor = connection.execute(
+                """UPDATE visualizations SET compile_request_json=?, simulation_options_json=?,
+                   current_job_id=?, updated_at=? WHERE visualization_id=?""",
+                (
+                    json.dumps(compile_request, ensure_ascii=False),
+                    json.dumps(simulation_options, ensure_ascii=False),
+                    job_id,
+                    utc_now(),
+                    visualization_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(visualization_id)
+            connection.execute(
+                "INSERT INTO visualization_jobs(visualization_id, job_id, role) VALUES (?, ?, 'visualization')",
+                (visualization_id, job_id),
+            )
+
+    def link_visualization_job(self, visualization_id: str, job_id: str, role: str) -> None:
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                "INSERT INTO visualization_jobs(visualization_id, job_id, role) VALUES (?, ?, ?)",
+                (visualization_id, job_id, role),
+            )
+
+    def get_visualization(self, visualization_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM visualizations WHERE visualization_id=?",
+                (visualization_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "visualizationId": row["visualization_id"],
+            "compileRequest": json.loads(row["compile_request_json"]),
+            "simulationOptions": json.loads(row["simulation_options_json"]),
+            "currentJobId": row["current_job_id"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
+
+    def visualization_jobs(self, visualization_id: str) -> list[tuple[str, str]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT job_id, role FROM visualization_jobs WHERE visualization_id=? ORDER BY rowid",
+                (visualization_id,),
+            ).fetchall()
+        return [(row["job_id"], row["role"]) for row in rows]
+
+    def visualization_events(self, visualization_id: str, after: int = 0) -> list[tuple[int, dict[str, Any]]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT event.sequence, event.payload_json
+                   FROM job_events AS event
+                   JOIN visualization_jobs AS link ON link.job_id=event.job_id
+                   WHERE link.visualization_id=? AND event.sequence>?
+                   ORDER BY event.sequence""",
+                (visualization_id, after),
             ).fetchall()
         return [(row["sequence"], json.loads(row["payload_json"])) for row in rows]
 

@@ -18,7 +18,16 @@ from pydantic import ValidationError
 from motionforge.constants import CONTRACT_VERSION, ENGINE_VERSION, MAX_REQUEST_BYTES, SCHEMA_VERSION, TIMELINE_VERSION
 from motionforge.errors import ErrorCode, MotionForgeError, validation_diagnostics
 from motionforge.jobs import JobManager
-from motionforge.models import CompileRequest, ExportRequest, JobResponse, JobStatus, SimulationRequest
+from motionforge.models import (
+    CompileRequest,
+    ExportRequest,
+    JobResponse,
+    JobStatus,
+    ParameterUpdateRequest,
+    SimulationRequest,
+    VisualizationExportRequest,
+    VisualizationRequest,
+)
 from motionforge.paths import AppPaths, app_paths
 from motionforge.render.manim_renderer import renderer_health
 
@@ -57,6 +66,33 @@ class MotionForgeHandler(BaseHTTPRequestHandler):
         if path == "/v1/health":
             self._json(HTTPStatus.OK, self._health())
             return
+        if path.startswith("/v1/visualizations/") and path.endswith("/events") and len(path.split("/")) == 5:
+            visualization_id = path.split("/")[3]
+            self._visualization_events(visualization_id)
+            return
+        if path.startswith("/v1/visualizations/") and path.endswith("/timeline") and len(path.split("/")) == 5:
+            visualization_id = path.split("/")[3]
+            try:
+                timeline = self.server.manager.visualization_timeline(visualization_id)
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "contractVersion": CONTRACT_VERSION,
+                        "visualizationId": visualization_id,
+                        "timeline": timeline.contract_dump(),
+                    },
+                )
+            except MotionForgeError as error:
+                self._motionforge_error(error)
+            return
+        if path.startswith("/v1/visualizations/") and len(path.split("/")) == 4:
+            visualization_id = path.split("/")[3]
+            visualization = self.server.manager.get_visualization(visualization_id)
+            if visualization is None:
+                self._error(HTTPStatus.NOT_FOUND, ErrorCode.NOT_FOUND, "Visualization not found.")
+            else:
+                self._json(HTTPStatus.OK, visualization)
+            return
         if path.startswith("/v1/jobs/") and path.endswith("/events"):
             job_id = path.split("/")[3]
             self._events(job_id)
@@ -83,6 +119,28 @@ class MotionForgeHandler(BaseHTTPRequestHandler):
                 job = self.server.manager.start_simulation(SimulationRequest.model_validate(body))
             elif path == "/v1/exports":
                 job = self.server.manager.start_export(ExportRequest.model_validate(body))
+            elif path == "/v1/visualizations":
+                visualization = self.server.manager.start_visualization(VisualizationRequest.model_validate(body))
+                self._json(HTTPStatus.ACCEPTED, visualization)
+                return
+            elif path.startswith("/v1/visualizations/") and path.endswith("/parameters") and len(path.split("/")) == 5:
+                visualization_id = path.split("/")[3]
+                visualization = self.server.manager.update_visualization_parameters(
+                    visualization_id,
+                    ParameterUpdateRequest.model_validate(body),
+                )
+                self._json(HTTPStatus.ACCEPTED, visualization)
+                return
+            elif path.startswith("/v1/visualizations/") and path.endswith("/exports") and len(path.split("/")) == 5:
+                visualization_id = path.split("/")[3]
+                export_job = self.server.manager.start_visualization_export(
+                    visualization_id,
+                    VisualizationExportRequest.model_validate(body),
+                )
+                payload = export_job.contract_dump()
+                payload["visualizationId"] = visualization_id
+                self._json(HTTPStatus.ACCEPTED, payload)
+                return
             else:
                 self._error(HTTPStatus.NOT_FOUND, ErrorCode.NOT_FOUND, "Route not found.")
                 return
@@ -92,7 +150,7 @@ class MotionForgeHandler(BaseHTTPRequestHandler):
             code = ErrorCode.CONTRACT_MISMATCH if any(item["path"].endswith("contractVersion") for item in diagnostics) else ErrorCode.INVALID_REQUEST
             self._error(HTTPStatus.BAD_REQUEST, code, "Request validation failed.", diagnostics)
         except MotionForgeError as error:
-            self._json(HTTPStatus.BAD_REQUEST, {"contractVersion": CONTRACT_VERSION, "error": error.as_dict()})
+            self._motionforge_error(error)
         except (json.JSONDecodeError, ValueError):
             self._error(HTTPStatus.BAD_REQUEST, ErrorCode.INVALID_REQUEST, "Request body must be valid JSON.")
 
@@ -100,6 +158,13 @@ class MotionForgeHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         path = urlparse(self.path).path.rstrip("/")
+        if path.startswith("/v1/visualizations/") and len(path.split("/")) == 4:
+            visualization = self.server.manager.cancel_visualization(path.split("/")[3])
+            if visualization is None:
+                self._error(HTTPStatus.NOT_FOUND, ErrorCode.NOT_FOUND, "Visualization not found.")
+            else:
+                self._json(HTTPStatus.OK, visualization)
+            return
         if path.startswith("/v1/jobs/"):
             job = self.server.manager.cancel(path.split("/")[3])
             if job is None:
@@ -164,6 +229,48 @@ class MotionForgeHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
+    def _visualization_events(self, visualization_id: str) -> None:
+        visualization = self.server.manager.get_visualization(visualization_id)
+        if visualization is None:
+            self._error(HTTPStatus.NOT_FOUND, ErrorCode.NOT_FOUND, "Visualization not found.")
+            return
+        try:
+            after = int(self.headers.get("Last-Event-ID", "0"))
+        except ValueError:
+            after = 0
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        deadline = time.monotonic() + 300
+        try:
+            while time.monotonic() < deadline:
+                events = self.server.manager.store.visualization_events(visualization_id, after)
+                for sequence, payload in events:
+                    payload["visualizationId"] = visualization_id
+                    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                    self.wfile.write(f"id: {sequence}\nevent: visualization\ndata: {encoded}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    after = sequence
+                visualization = self.server.manager.get_visualization(visualization_id)
+                if visualization is None:
+                    break
+                visualization_done = visualization["status"] in {"completed", "failed", "cancelled"}
+                exports_done = all(
+                    item["status"] in {"completed", "failed", "cancelled"}
+                    for item in visualization.get("exports", [])
+                )
+                if visualization_done and exports_done:
+                    self.close_connection = True
+                    break
+                self.wfile.write(b": keep-alive\n\n")
+                self.wfile.flush()
+                time.sleep(0.5)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
     def _health(self) -> dict[str, Any]:
         return {
             "contractVersion": CONTRACT_VERSION,
@@ -191,6 +298,14 @@ class MotionForgeHandler(BaseHTTPRequestHandler):
                 },
             },
             "limits": {"requestBytes": MAX_REQUEST_BYTES, "exportConcurrency": 1},
+            "capabilities": {
+                "visualizations": True,
+                "parameterUpdates": True,
+                "timeline": True,
+                "mp4Export": True,
+                "cancellation": True,
+                "sse": True,
+            },
         }
 
     def _json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
@@ -205,6 +320,10 @@ class MotionForgeHandler(BaseHTTPRequestHandler):
         if details is not None:
             error["details"] = details
         self._json(status, {"contractVersion": CONTRACT_VERSION, "error": error})
+
+    def _motionforge_error(self, error: MotionForgeError) -> None:
+        status = HTTPStatus.NOT_FOUND if error.code == ErrorCode.NOT_FOUND else HTTPStatus.BAD_REQUEST
+        self._json(status, {"contractVersion": CONTRACT_VERSION, "error": error.as_dict()})
 
     def _common_headers(self, length: int) -> None:
         self.send_header("Content-Type", "application/json; charset=utf-8")

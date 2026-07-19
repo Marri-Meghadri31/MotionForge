@@ -13,10 +13,10 @@ Do not put provider keys or the launch secret in URLs, command-line provider arg
 
 ## Visualization flow
 
-Create and poll a compile job:
+The UI-oriented API compiles and simulates under one durable visualization ID:
 
 ```http
-POST /v1/scenes/compile
+POST /v1/visualizations
 Authorization: Bearer <launch-secret>
 Content-Type: application/json
 
@@ -25,17 +25,8 @@ Content-Type: application/json
   "prompt": "Launch a projectile at 45 degrees",
   "preferTemplate": true,
   "provider": "ollama",
-  "model": "llama3.1"
-}
-```
-
-When the compile job is `completed`, start simulation by reference:
-
-```json
-{
-  "contractVersion": 1,
-  "compileJobId": "<compile-job-id>",
-  "options": {
+  "model": "llama3.1",
+  "simulationOptions": {
     "recommendedPlaybackFps": 30,
     "recordInspectables": true,
     "detectEvents": true
@@ -43,14 +34,38 @@ When the compile job is `completed`, start simulation by reference:
 }
 ```
 
-The completed simulation job contains `result.timeline`. Store that timeline immediately and render it in Canvas. MP4 is never on the preview critical path.
+Poll `GET /v1/visualizations/:id` or subscribe to `GET /v1/visualizations/:id/events`. Once its stage is `ready`, fetch the compact timeline separately:
 
-Optional export uses the simulation job reference:
+```http
+GET /v1/visualizations/:id/timeline
+```
+
+Store that timeline immediately and render it in Canvas. MP4 is never on the preview critical path. The lower-level `/v1/scenes/compile` and `/v1/simulations` job APIs remain available for clients that need stage-by-stage orchestration.
+
+Apply a validated declared parameter and rebuild the timeline while retaining the visualization ID:
+
+```http
+POST /v1/visualizations/:id/parameters
+Content-Type: application/json
+
+{
+  "contractVersion": 1,
+  "parameters": { "speed": 500 }
+}
+```
+
+Parameter updates reject unknown, unsafe, incorrectly typed, and out-of-range values. Contract v1 supports parameter updates for deterministic template visualizations.
+
+Optional export uses the visualization timeline:
+
+```http
+POST /v1/visualizations/:id/exports
+Content-Type: application/json
+```
 
 ```json
 {
   "contractVersion": 1,
-  "simulationJobId": "<simulation-job-id>",
   "options": { "preset": "preview" }
 }
 ```
@@ -77,7 +92,7 @@ Every job has this stable shape:
 }
 ```
 
-Use `GET /v1/jobs/:id/events` for SSE and send its `id` as `Last-Event-ID` when reconnecting. Polling is a compatible fallback. Cancel with `DELETE /v1/jobs/:id`; the simulator checks its token between steps and export cancellation terminates the worker process tree.
+Use `GET /v1/visualizations/:id/events` for SSE and send its `id` as `Last-Event-ID` when reconnecting. Polling `GET /v1/visualizations/:id` is a compatible fallback. Cancel active visualization and linked export work with `DELETE /v1/visualizations/:id`; the simulator checks its token between steps and export cancellation terminates the worker process tree. The lower-level job event and cancellation routes remain supported.
 
 ## Canvas playback
 
@@ -91,4 +106,4 @@ Use `GET /v1/jobs/:id/events` for SSE and send its `id` as `Last-Event-ID` when 
 - Overlay tracks are independent of physics tracks so Guide can change visibility or highlights without re-simulation.
 - Values available for inspection include velocity, angular velocity, acceleration, applied force, kinetic/potential energy, and momentum.
 
-The current Velo backend still invokes the compatible legacy prompt-to-MP4 CLI. Its migration target is the lifecycle and job sequence above; no MotionForge UI is duplicated in this repository.
+The current Velo backend still invokes the compatible legacy prompt-to-MP4 CLI. Its migration target is the lifecycle above;

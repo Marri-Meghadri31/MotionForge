@@ -392,6 +392,28 @@ class SimulationRequest(ContractModel):
         return self
 
 
+class VisualizationRequest(CompileRequest):
+    """Create a playable visualization in one compile-and-simulate operation."""
+
+    simulation_options: SimulationOptions = Field(default_factory=SimulationOptions)
+
+    def compile_request(self) -> CompileRequest:
+        return CompileRequest.model_validate(
+            self.contract_dump(exclude={"simulation_options"})
+        )
+
+
+class ParameterUpdateRequest(ContractModel):
+    contract_version: int = Field(default=CONTRACT_VERSION, ge=CONTRACT_VERSION, le=CONTRACT_VERSION)
+    parameters: dict[str, float | int | bool | str] = Field(min_length=1, max_length=64)
+    simulation_options: SimulationOptions | None = None
+
+
+class VisualizationExportRequest(ContractModel):
+    contract_version: int = Field(default=CONTRACT_VERSION, ge=CONTRACT_VERSION, le=CONTRACT_VERSION)
+    options: "ExportOptions" = Field(default_factory=lambda: ExportOptions())
+
+
 class TimelineObject(ContractModel):
     shape: ShapeKind
     is_static: bool
@@ -591,7 +613,7 @@ def utc_now() -> str:
 class JobResponse(ContractModel):
     contract_version: int = CONTRACT_VERSION
     job_id: str
-    kind: Literal["compile", "simulation", "export"]
+    kind: Literal["compile", "simulation", "export", "visualization"]
     status: JobStatus
     stage: JobStage
     progress: float = Field(ge=0, le=1)

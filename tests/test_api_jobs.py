@@ -6,10 +6,13 @@ import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from motionforge.api.server import SidecarServer
+from motionforge.errors import ErrorCode, MotionForgeError
 from motionforge.jobs.store import JobStore
-from motionforge.models import JobResponse, JobStage, JobStatus, utc_now
+from motionforge.models import ExportResult, JobResponse, JobStage, JobStatus, utc_now
 from motionforge.paths import app_paths
 
 
@@ -49,6 +52,16 @@ class SidecarIntegrationTests(unittest.TestCase):
             time.sleep(0.02)
         self.fail("job did not complete")
 
+    def wait_for_visualization(self, visualization_id: str):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            status, visualization = self.request("GET", f"/v1/visualizations/{visualization_id}")
+            self.assertEqual(status, 200)
+            if visualization["status"] in {"completed", "failed", "cancelled"}:
+                return visualization
+            time.sleep(0.02)
+        self.fail("visualization did not complete")
+
     def test_health_is_authenticated_and_versioned(self) -> None:
         status, body = self.request("GET", "/v1/health", authorized=False)
         self.assertEqual(status, 401)
@@ -57,6 +70,7 @@ class SidecarIntegrationTests(unittest.TestCase):
         status, body = self.request("GET", "/v1/health")
         self.assertEqual(status, 200)
         self.assertEqual(body["contractVersion"], 1)
+        self.assertTrue(body["capabilities"]["visualizations"])
         self.assertLess(time.perf_counter() - started, 0.2)
 
     def test_compile_then_simulate_via_job_references(self) -> None:
@@ -82,6 +96,9 @@ class SidecarIntegrationTests(unittest.TestCase):
         status, body = self.request("POST", "/v1/scenes/compile", {"contractVersion": 2, "prompt": "falling ball"})
         self.assertEqual(status, 400)
         self.assertEqual(body["error"]["code"], "CONTRACT_MISMATCH")
+        status, body = self.request("POST", "/v1/visualizations", {"contractVersion": 2, "prompt": "falling ball"})
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"]["code"], "CONTRACT_MISMATCH")
 
     def test_completed_job_events_are_available_as_sse(self) -> None:
         status, started = self.request("POST", "/v1/scenes/compile", {"prompt": "falling ball"})
@@ -99,6 +116,133 @@ class SidecarIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn("event: job", body)
         self.assertIn('"status":"completed"', body)
+
+    def test_visualization_create_get_timeline_and_parameter_update(self) -> None:
+        status, created = self.request(
+            "POST",
+            "/v1/visualizations",
+            {"contractVersion": 1, "prompt": "projectile motion"},
+        )
+        self.assertEqual(status, 202)
+        visualization_id = created["visualizationId"]
+        first_job_id = created["jobId"]
+        completed = self.wait_for_visualization(visualization_id)
+        self.assertEqual(completed["status"], "completed", completed.get("error"))
+        self.assertNotIn("timeline", completed)
+        self.assertEqual(completed["scene"]["metadata"]["templateId"], "projectile-motion")
+
+        status, timeline_payload = self.request("GET", f"/v1/visualizations/{visualization_id}/timeline")
+        self.assertEqual(status, 200)
+        first_timeline = timeline_payload["timeline"]
+
+        status, updating = self.request(
+            "POST",
+            f"/v1/visualizations/{visualization_id}/parameters",
+            {"contractVersion": 1, "parameters": {"speed": 500}},
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(updating["visualizationId"], visualization_id)
+        self.assertNotEqual(updating["jobId"], first_job_id)
+        updated = self.wait_for_visualization(visualization_id)
+        self.assertEqual(updated["status"], "completed", updated.get("error"))
+        self.assertEqual(updated["parameterValues"]["speed"], 500)
+
+        status, updated_timeline_payload = self.request("GET", f"/v1/visualizations/{visualization_id}/timeline")
+        self.assertEqual(status, 200)
+        self.assertNotEqual(first_timeline["sourceSceneHash"], updated_timeline_payload["timeline"]["sourceSceneHash"])
+
+    def test_visualization_export_and_sse_routes(self) -> None:
+        status, created = self.request("POST", "/v1/visualizations", {"prompt": "falling ball"})
+        self.assertEqual(status, 202)
+        visualization_id = created["visualizationId"]
+        completed = self.wait_for_visualization(visualization_id)
+        self.assertEqual(completed["status"], "completed", completed.get("error"))
+
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
+        connection.request(
+            "GET",
+            f"/v1/visualizations/{visualization_id}/events",
+            headers={"authorization": "Bearer test-secret"},
+        )
+        response = connection.getresponse()
+        events = response.read().decode("utf-8")
+        connection.close()
+        self.assertEqual(response.status, 200)
+        self.assertIn("event: visualization", events)
+        self.assertIn(f'"visualizationId":"{visualization_id}"', events)
+
+        def fake_export(job_id, timeline, request, cancel):
+            output = self.server.paths.exports / job_id / "animation.mp4"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"fake-mp4")
+            width, height, fps = request.options.resolved()
+            return ExportResult(
+                output_path=str(output),
+                duration=timeline.duration,
+                width=width,
+                height=height,
+                fps=fps,
+                size_bytes=output.stat().st_size,
+                render_seconds=0.01,
+            )
+
+        with patch.object(self.server.manager, "_isolated_export", side_effect=fake_export):
+            status, export_job = self.request(
+                "POST",
+                f"/v1/visualizations/{visualization_id}/exports",
+                {"contractVersion": 1, "options": {"preset": "preview"}},
+            )
+            self.assertEqual(status, 202)
+            self.assertEqual(export_job["visualizationId"], visualization_id)
+            exported = self.wait_for_job(export_job["jobId"])
+        self.assertEqual(exported["status"], "completed", exported.get("error"))
+        self.assertTrue(Path(exported["result"]["export"]["outputPath"]).is_file())
+
+    def test_visualization_cancel_stops_active_work(self) -> None:
+        entered = threading.Event()
+
+        def slow_compile(request, *, cancel_event, progress):
+            entered.set()
+            cancel_event.wait(2)
+            raise MotionForgeError(ErrorCode.CANCELLED, "Visualization was cancelled.")
+
+        with patch("motionforge.jobs.manager.compile_scene", side_effect=slow_compile):
+            status, created = self.request("POST", "/v1/visualizations", {"prompt": "falling ball"})
+            self.assertEqual(status, 202)
+            self.assertTrue(entered.wait(1))
+            visualization_id = created["visualizationId"]
+            status, cancelled = self.request("DELETE", f"/v1/visualizations/{visualization_id}")
+            self.assertEqual(status, 200)
+            self.assertIn(created["jobId"], cancelled["cancelledJobIds"])
+            finished = self.wait_for_visualization(visualization_id)
+        self.assertEqual(finished["status"], "cancelled")
+
+    def test_visualization_cancel_stops_linked_export(self) -> None:
+        status, created = self.request("POST", "/v1/visualizations", {"prompt": "falling ball"})
+        self.assertEqual(status, 202)
+        visualization_id = created["visualizationId"]
+        completed = self.wait_for_visualization(visualization_id)
+        self.assertEqual(completed["status"], "completed", completed.get("error"))
+        entered = threading.Event()
+
+        def slow_export(job_id, timeline, request, cancel):
+            entered.set()
+            cancel.wait(2)
+            raise MotionForgeError(ErrorCode.CANCELLED, "Video export was cancelled.")
+
+        with patch.object(self.server.manager, "_isolated_export", side_effect=slow_export):
+            status, export_job = self.request(
+                "POST",
+                f"/v1/visualizations/{visualization_id}/exports",
+                {"options": {"preset": "preview"}},
+            )
+            self.assertEqual(status, 202)
+            self.assertTrue(entered.wait(1))
+            status, cancelled = self.request("DELETE", f"/v1/visualizations/{visualization_id}")
+            self.assertEqual(status, 200)
+            self.assertIn(export_job["jobId"], cancelled["cancelledJobIds"])
+            finished = self.wait_for_job(export_job["jobId"])
+        self.assertEqual(finished["status"], "cancelled")
 
 
 class JobRecoveryTests(unittest.TestCase):
