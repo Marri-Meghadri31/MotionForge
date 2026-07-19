@@ -286,8 +286,15 @@ def spring(prompt: str, values: dict[str, Any]) -> SceneSpec:
 
 
 def motion_graph(prompt: str, values: dict[str, Any]) -> SceneSpec:
+    linear_motion = bool(
+        re.search(
+            r"\b(linear|straight[ -]?line|constant[ -]?(velocity|speed)|uniform[ -]?motion)\b",
+            prompt,
+            re.I,
+        )
+    )
     velocity = _number(values, "velocity", 90, -500, 500)
-    acceleration = _number(values, "acceleration", 35, -500, 500)
+    acceleration = _number(values, "acceleration", 0 if linear_motion else 35, -500, 500)
     mass = _number(values, "mass", 1, 0.1, 100)
     return _scene(
         "motion-graphs",
@@ -299,7 +306,7 @@ def motion_graph(prompt: str, values: dict[str, Any]) -> SceneSpec:
             forces=[ConstantForce(applies_to=["marker"], vector=(mass * acceleration, 0))],
         ),
         {"marker": ObjectStyle(color="#378ADD", label="object", show_label=True)},
-        title="Position, velocity, and acceleration",
+        title="Linear motion graphs" if linear_motion else "Position, velocity, and acceleration",
         camera=(0, 80),
         trail=True,
         overlays=[OverlaySpec(id="graphs", kind="graph", target_id="marker", label="x(t), v(t), a(t)", color="#7F77DD", data={"series": ["x", "vx", "ax"]})],
@@ -323,7 +330,16 @@ TEMPLATES: dict[str, Template] = {
 }
 
 CLASSIFIERS: list[tuple[str, re.Pattern[str]]] = [
-    ("motion-graphs", re.compile(r"\b(position|velocity|acceleration)\b.*\b(graph|plot)\b|\b(graph|plot)\b.*\b(motion|position|velocity|acceleration)\b", re.I)),
+    (
+        "motion-graphs",
+        re.compile(
+            r"\b(position|displacement|distance|velocity|speed|acceleration|motion|kinematic|linear|slope|time)\b"
+            r".*\b(graph|plot|chart)\w*\b|"
+            r"\b(graph|plot|chart)\w*\b.*"
+            r"\b(motion|position|displacement|distance|velocity|speed|acceleration|kinematic|linear|slope|time)\b",
+            re.I,
+        ),
+    ),
     ("spring-shm", re.compile(r"\b(spring|simple harmonic|shm|oscillat)\w*\b", re.I)),
     ("pendulum", re.compile(r"\bpendulum\b", re.I)),
     ("collision-momentum", re.compile(r"\b(collid|collision|momentum|impact)\w*\b", re.I)),

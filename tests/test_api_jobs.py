@@ -151,6 +151,21 @@ class SidecarIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertNotEqual(first_timeline["sourceSceneHash"], updated_timeline_payload["timeline"]["sourceSceneHash"])
 
+    def test_linear_graph_prompt_uses_deterministic_visualization(self) -> None:
+        status, created = self.request(
+            "POST",
+            "/v1/visualizations",
+            {"contractVersion": 1, "prompt": "make a linear graph", "preferTemplate": True},
+        )
+        self.assertEqual(status, 202)
+        completed = self.wait_for_visualization(created["visualizationId"])
+        self.assertEqual(completed["status"], "completed", completed.get("error"))
+        self.assertEqual(completed["scene"]["metadata"]["origin"], "template")
+        self.assertEqual(completed["scene"]["metadata"]["templateId"], "motion-graphs")
+        status, payload = self.request("GET", f"/v1/visualizations/{created['visualizationId']}/timeline")
+        self.assertEqual(status, 200)
+        self.assertTrue(all(value == 0 for value in payload["timeline"]["tracks"]["marker"]["ax"]))
+
     def test_visualization_export_and_sse_routes(self) -> None:
         status, created = self.request("POST", "/v1/visualizations", {"prompt": "falling ball"})
         self.assertEqual(status, 202)

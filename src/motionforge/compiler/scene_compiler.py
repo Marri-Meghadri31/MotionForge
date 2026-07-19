@@ -18,11 +18,21 @@ from motionforge.providers import Provider, build_provider
 
 MAX_MODEL_ATTEMPTS = 2
 
-SYSTEM_PROMPT = """You are MotionForge's physics scene compiler. Return one JSON object and no prose.
-Use only the schema's primitive 2D bodies and constraints. Coordinates are Cartesian with +y upward,
-normally within an 800 by 500 scene. Keep scenes short, physically plausible, and educational.
-Never emit code, URLs, LaTeX commands, asset paths, or keys outside the provided JSON Schema.
-Every visual or force reference must name a real object."""
+SYSTEM_PROMPT = """You are MotionForge's physics scene compiler. Turn the learner's physics question into
+one short, physically meaningful visualization and return one JSON object with no prose.
+Use only the exact fields and enum values in the supplied JSON Schema. In particular:
+- Physics objects use `id`, `shape`, and numeric `[x, y]` arrays for position and velocity.
+- Object color and labels belong in `visual.objectStyles`, never in physics objects.
+- Constraints are only `pin` or `dampedSpring` and use `objectA` and `objectB` IDs.
+- A requested graph must be a `graph` overlay targeting a simulated object, not a chain of bodies.
+- Prefer a clear primitive analogy when the concept is abstract; never invent a new object or constraint type.
+Coordinates are Cartesian with +y upward, normally within an 800 by 500 scene. Keep scenes bounded,
+short, physically plausible, and educational. Never emit code, URLs, LaTeX commands, asset paths,
+or keys outside the supplied JSON Schema. Every style, overlay, force, and constraint reference must
+name a real object.
+
+A minimal valid shape is:
+{"schemaVersion":1,"physics":{"duration":3,"dt":0.0166666667,"gravity":[0,-981],"objects":[{"id":"body","shape":"circle","radius":20,"position":[0,100]}]},"visual":{"objectStyles":{"body":{"color":"#378ADD"}}}}"""
 
 COLOR_NAMES = {
     "white": "#FFFFFF",
@@ -186,7 +196,11 @@ class SceneCompiler:
                         {"role": "assistant", "content": raw},
                         {
                             "role": "user",
-                            "content": "Correct only these validation errors and return the complete JSON object: " + json.dumps(diagnostics),
+                            "content": (
+                                "The response does not match MotionForge's schema. Rebuild the complete JSON object from scratch, "
+                                "using only the exact schema field names and enum values. Do not preserve unsupported object or "
+                                "constraint types. Correct these validation errors: " + json.dumps(diagnostics)
+                            ),
                         },
                     ]
                 )

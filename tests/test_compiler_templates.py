@@ -52,6 +52,8 @@ class CompilerTests(unittest.TestCase):
     def test_classifier_uses_high_confidence_concepts(self) -> None:
         cases = {
             "plot velocity against time": "motion-graphs",
+            "make a linear graph": "motion-graphs",
+            "make a linear motion graph": "motion-graphs",
             "a mass on a spring oscillates": "spring-shm",
             "two carts collide and exchange momentum": "collision-momentum",
             "launch a projectile at 45 degrees": "projectile-motion",
@@ -60,6 +62,14 @@ class CompilerTests(unittest.TestCase):
         for prompt, expected in cases.items():
             self.assertEqual(classify_template(prompt), expected)
         self.assertIsNone(classify_template("explain quantum tunnelling"))
+
+    def test_linear_graph_uses_constant_velocity_defaults(self) -> None:
+        scene = compile_template("motion-graphs", "make a linear graph", {})
+        self.assertEqual(scene.metadata.template_id, "motion-graphs")
+        self.assertEqual(scene.physics.forces[0].vector[0], 0)
+        self.assertEqual(scene.visual.title, "Linear motion graphs")
+        acceleration = next(parameter for parameter in scene.parameters if parameter.id == "acceleration")
+        self.assertEqual(acceleration.default, 0)
 
     def test_safe_repair_adds_styles_normalizes_colors_and_clamps(self) -> None:
         repaired = repair_scene_data(
