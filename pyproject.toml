@@ -1,7 +1,7 @@
 [project]
-name = "prompt-animator"
-version = "0.1.0"
-description = "Add your description here"
+name = "motionforge"
+version = "1.0.0"
+description = "Renderer-independent physics scene compiler, simulator, timeline service, and exporter"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -14,19 +14,15 @@ dependencies = [
 ]
 
 [project.scripts]
-prompt-animator = "main:main"
+motionforge = "motionforge.cli:main"
+prompt-animator = "motionforge.cli:main"
 
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = [
-    "engines",
-    "llm",
-    "llm.providers",
-    "render",
-    "schema",
-    "timeline",
-]
-py-modules = ["main"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

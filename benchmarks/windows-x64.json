@@ -1,0 +1,31 @@
+{
+  "measuredAt": "2026-07-19",
+  "platform": "Windows-10-10.0.19045-SP0",
+  "python": "3.12.13",
+  "qualityPrompts": 9,
+  "iterations": 10,
+  "templateCompile": {
+    "samples": 90,
+    "p50Ms": 0.095,
+    "p95Ms": 0.131,
+    "maxMs": 0.234
+  },
+  "simulationAndTimeline": {
+    "samples": 90,
+    "p50Ms": 3.909,
+    "p95Ms": 6.263,
+    "maxMs": 8.21
+  },
+  "templatePreviewTotal": {
+    "samples": 90,
+    "p50Ms": 4.016,
+    "p95Ms": 6.373,
+    "maxMs": 8.292
+  },
+  "cachedSceneLookupAndValidation": {
+    "samples": 90,
+    "p50Ms": 1.121,
+    "p95Ms": 5.853,
+    "maxMs": 6.212
+  }
+}
