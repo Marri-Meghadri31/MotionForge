@@ -22,7 +22,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 uv run pyinstaller --clean --noconfirm prompt-animator.spec
 if ($LASTEXITCODE -ne 0) {
-    throw "PyInstaller failed with exit code $LASTEXITCODE"
+    throw "PyInstaller onedir build failed with exit code $LASTEXITCODE"
+}
+uv run pyinstaller --clean --noconfirm --workpath build/prompt-animator-onefile prompt-animator-onefile.spec
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller legacy one-file build failed with exit code $LASTEXITCODE"
 }
 
 Write-Host "Built: $ProjectRoot\dist\prompt-animator\prompt-animator.exe"
+Write-Host "Built legacy compatibility executable: $ProjectRoot\dist\prompt-animator.exe"

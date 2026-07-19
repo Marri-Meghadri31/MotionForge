@@ -142,7 +142,7 @@ def render_video(
 
 def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancelled: Event) -> Path:
     # Importing Manim is deliberately isolated from sidecar startup and preview work.
-    from manim import BLACK, WHITE, Circle, Line, ManimColor, Polygon, Rectangle, Scene, Text, ValueTracker, VMobject, linear, tempconfig
+    from manim import BLACK, WHITE, Circle, Line, ManimColor, Polygon, Rectangle, Scene, Text, UpdateFromAlphaFunc, VGroup, VMobject, linear, tempconfig
 
     workspace = Path(tempfile.mkdtemp(prefix="motionforge-export-"))
 
@@ -311,11 +311,27 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                     _update_graph(graph, timestamp, timeline.duration)
                 last_trail_frame[0] = frame_index
 
-            clock = ValueTracker(0)
-            clock.add_updater(lambda tracker: update_scene(tracker.get_value()))
-            self.add(clock)
-            self.play(clock.animate.set_value(timeline.duration), run_time=timeline.duration, rate_func=linear)
-            clock.clear_updaters()
+            # Animating a ValueTracker suspends that tracker's updaters in Manim.
+            # An invisible standalone driver also lets Cairo cache all visible
+            # objects as a static background. Make every mutable visual part of
+            # the animated group so the renderer redraws timeline changes.
+            dynamic_mobjects = [*shapes.values(), *labels.values(), *trails.values()]
+            for line, vector_label, _overlay in vector_overlays.values():
+                dynamic_mobjects.append(line)
+                if vector_label is not None:
+                    dynamic_mobjects.append(vector_label)
+            dynamic_mobjects.extend(line for line, _constraint in constraint_overlays.values())
+            dynamic_mobjects.extend(highlight for highlight, _target_id in highlight_overlays.values())
+            for graph in graph_overlays.values():
+                dynamic_mobjects.extend(graph["curves"])
+            self.remove(*dynamic_mobjects)
+            driver = VGroup(*dynamic_mobjects)
+            self.add(driver)
+            self.play(
+                UpdateFromAlphaFunc(driver, lambda _driver, alpha: update_scene(alpha * timeline.duration)),
+                run_time=timeline.duration,
+                rate_func=linear,
+            )
 
     config = {
         "media_dir": str(workspace),

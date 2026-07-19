@@ -104,7 +104,10 @@ Output:
 
 ```text
 dist\prompt-animator\prompt-animator.exe
+dist\prompt-animator.exe
 ```
+
+The directory build is the primary sidecar distribution. The single-file executable is also rebuilt as a legacy Velo API compatibility target.
 
 The build script bundles the FFmpeg selected by `-FfmpegPath`, `MOTIONFORGE_FFMPEG`, or the current `PATH`. At runtime MotionForge checks the bundled resource, the executable directory, `MOTIONFORGE_FFMPEG`, then `PATH`. Build separately on each target OS/architecture; PyInstaller artifacts are not cross-platform.
 
