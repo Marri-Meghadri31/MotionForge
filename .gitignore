@@ -1,9 +1,13 @@
 # Virtual environment
 .venv/
+build/
+dist/
+*.egg-info/
 
 # Python
 __pycache__/
 *.py[cod]
+.tmp-*
 
 # Manim
 media/

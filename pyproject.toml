@@ -1,11 +1,28 @@
 [project]
-name = "prompt-animator"
-version = "0.1.0"
-description = "Add your description here"
+name = "motionforge"
+version = "1.0.0"
+description = "Renderer-independent physics scene compiler, simulator, timeline service, and exporter"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=0.117.0",
     "manim>=0.20.1",
     "pydantic>=2.13.4",
+    "pyinstaller>=6.21.0",
     "pymunk>=7.3.0",
+    "requests>=2.34.2",
 ]
+
+[project.scripts]
+motionforge = "motionforge.cli:main"
+prompt-animator = "motionforge.cli:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
