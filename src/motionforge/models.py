@@ -49,7 +49,7 @@ OverlayKind = Literal[
 ]
 AnchorKind = Literal["center", "top", "bottom", "left", "right", "pointA", "pointB", "start", "end"]
 GeometryOperation = Literal["connect", "extendToY", "deltaX", "deltaY", "distance"]
-RenderStyle = Literal["shape", "person", "lamp", "light", "ground"]
+RenderStyle = Literal["shape", "ball", "person", "lamp", "light", "ground"]
 
 
 def _camel(name: str) -> str:
@@ -186,6 +186,27 @@ class ConstantForce(ContractModel):
         return value
 
 
+class ForceFieldSpec(ContractModel):
+    """A declarative position-dependent interaction evaluated every physics step."""
+
+    id: str
+    type: Literal["inverseSquare"]
+    sources: list[str] = Field(min_length=1, max_length=MAX_OBJECTS)
+    targets: list[str] = Field(min_length=1, max_length=MAX_OBJECTS)
+    strength: float = Field(gt=0, le=MAX_FORCE_MAGNITUDE)
+    direction: Literal["attract", "repel"] = "attract"
+    softening: float = Field(default=1.0, ge=0, le=MAX_COORDINATE)
+    max_force: float = Field(default=MAX_FORCE_MAGNITUDE, gt=0, le=MAX_FORCE_MAGNITUDE)
+    mutual: bool = False
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        if not IDENTIFIER.fullmatch(value):
+            raise ValueError("id must be 1-64 safe identifier characters")
+        return value
+
+
 class ConstraintSpec(ContractModel):
     id: str
     type: Literal["pin", "dampedSpring"]
@@ -213,6 +234,7 @@ class PhysicsSpec(ContractModel):
     dt: float = Field(default=1 / 60, ge=MIN_TIMESTEP_SECONDS, le=MAX_TIMESTEP_SECONDS)
     objects: list[PhysicsObject] = Field(min_length=1, max_length=MAX_OBJECTS)
     forces: list[ConstantForce] = Field(default_factory=list, max_length=MAX_FORCES)
+    force_fields: list[ForceFieldSpec] = Field(default_factory=list, max_length=MAX_FORCES)
     constraints: list[ConstraintSpec] = Field(default_factory=list, max_length=MAX_FORCES)
 
     @field_validator("gravity")
@@ -236,6 +258,20 @@ class PhysicsSpec(ContractModel):
             static_targets = set(force.applies_to) - dynamic
             if static_targets:
                 raise ValueError(f"forces cannot target static objects: {', '.join(sorted(static_targets))}")
+        field_ids = [field.id for field in self.force_fields]
+        if len(field_ids) != len(set(field_ids)):
+            raise ValueError("force-field ids must be unique")
+        for field in self.force_fields:
+            missing = (set(field.sources) | set(field.targets)) - known
+            if missing:
+                raise ValueError(f"force field references unknown objects: {', '.join(sorted(missing))}")
+            static_targets = set(field.targets) - dynamic
+            if static_targets and not field.mutual:
+                raise ValueError(
+                    f"directed force fields cannot target static objects: {', '.join(sorted(static_targets))}"
+                )
+            if not any(source != target for source in field.sources for target in field.targets):
+                raise ValueError("force field requires at least two different objects")
         constraint_ids = [constraint.id for constraint in self.constraints]
         if len(constraint_ids) != len(set(constraint_ids)):
             raise ValueError("constraint ids must be unique")
@@ -434,7 +470,7 @@ class CompileRequest(ContractModel):
     template: str | None = None
     provider: Literal["ollama", "anthropic"] = "ollama"
     model: str | None = Field(default=None, max_length=200)
-    prefer_template: bool = True
+    prefer_template: bool = False
     timeout_seconds: float = Field(default=90.0, gt=0, le=300)
     privacy: Literal["standard", "redact"] = "standard"
 
@@ -516,6 +552,7 @@ class TimelineScene(ContractModel):
     gravity: Point = (0.0, -981.0)
     objects: dict[str, TimelineObject]
     constraints: list[ConstraintSpec] = Field(default_factory=list)
+    force_fields: list[ForceFieldSpec] = Field(default_factory=list)
     camera: CameraSpec = Field(default_factory=CameraSpec)
     trail: TrailSpec = Field(default_factory=TrailSpec)
 

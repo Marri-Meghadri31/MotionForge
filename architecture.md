@@ -211,6 +211,12 @@ The converter samples line projections, ground intersections, and measurements
 against every Pymunk frame and stores them as overlay tracks. Manim and any
 future renderer therefore replay identical geometry and numeric results.
 
+Position-dependent force fields follow the same rule. The scene declares the
+sources, targets, strength, direction, softening, and force ceiling. The physics
+layer evaluates them at every fixed Pymunk step and records the resulting force
+and acceleration in the object tracks. An elliptical orbit is therefore data,
+not a special Manim scene or an orbit template.
+
 ---
 
 # Layer 4 — Manim Renderer

@@ -237,6 +237,18 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                         "hip_y": hip_y,
                         "foot_y": foot_y,
                     }
+                elif definition.render_as == "ball" and definition.shape == "circle":
+                    radius = max((definition.radius or 1) * scale, 0.04)
+                    shell = Circle(
+                        radius=radius,
+                        color=color,
+                        fill_color=color,
+                        fill_opacity=definition.opacity,
+                        stroke_width=max(2, definition.stroke_width),
+                    )
+                    spoke = Line((0, 0, 0), (radius * 0.72, 0, 0), color=label_color, stroke_width=2.5)
+                    hub = Circle(radius=max(radius * 0.08, 0.018), color=label_color, fill_color=label_color, fill_opacity=1)
+                    shape = VGroup(shell, spoke, hub)
                 elif definition.render_as == "light":
                     radius = max((definition.radius or 8) * scale, 0.1)
                     core = Circle(radius=radius, color=color, fill_color=color, fill_opacity=0.95, stroke_width=2)
@@ -291,12 +303,6 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                     trail_points[obj_id] = deque(maxlen=timeline.scene.trail.max_points)
                     self.add(trail)
 
-            if timeline.scene.title:
-                title = Text(timeline.scene.title, font_size=28, color=label_color)
-                title.to_edge(UP, buff=0.16)
-                title_rule = Line((-6.45, title.get_bottom()[1] - 0.1, 0), (6.45, title.get_bottom()[1] - 0.1, 0), color=ManimColor("#D0D5DD"), stroke_width=1)
-                self.add(title_rule, title)
-
             vector_overlays: dict[str, tuple[Any, Any | None, Any]] = {}
             constraint_overlays: dict[str, tuple[Any, Any]] = {}
             highlight_overlays: dict[str, tuple[Any, str]] = {}
@@ -319,12 +325,16 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                         initial[overlay.target_id]["y"] + float(vector_offset[1]),
                     )
                     line = Arrow(origin, (origin[0] + 0.01, origin[1], 0), color=color, stroke_width=4, buff=0)
-                    vector_label = Text(overlay.label, font_size=16, color=color) if overlay.label else None
+                    vector_label = (
+                        Text(overlay.label, font_size=int(overlay.data.get("fontSize", 16)), color=color)
+                        if overlay.label
+                        else None
+                    )
                     group = VGroup(line, *([vector_label] if vector_label is not None else []))
                     self.add(group)
                     timed_groups.append((group, overlay))
                     dynamic_overlay_groups.append(group)
-                    vector_overlays[overlay_id] = (line, vector_label, overlay)
+                    vector_overlays[overlay_id] = (line, vector_label, overlay, group)
                 elif overlay.kind == "path" and isinstance(overlay.data.get("constraint"), str):
                     constraint = next((item for item in timeline.scene.constraints if item.id == overlay.data["constraint"]), None)
                     if constraint is not None:
@@ -513,9 +523,18 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                         trail_points[obj_id].append(point(state["x"], state["y"]))
                         if len(trail_points[obj_id]) >= 2:
                             trails[obj_id].set_points_as_corners(list(trail_points[obj_id]))
-                for line, vector_label, overlay in vector_overlays.values():
+                vector_activity: list[tuple[Any, bool]] = []
+                for line, vector_label, overlay, vector_group in vector_overlays.values():
                     target = states[overlay.target_id]
                     vx, vy = _overlay_vector(overlay.data.get("source"), target, timeline, overlay.target_id)
+                    magnitude = math.hypot(vx, vy)
+                    vector_activity.append(
+                        (
+                            vector_group,
+                            not overlay.data.get("hideWhenZero", False)
+                            or magnitude >= float(overlay.data.get("zeroThreshold", 0.5)),
+                        )
+                    )
                     vector_scale = float(overlay.data.get("scale", 0.1))
                     vector_offset = overlay.data.get("offset", [0, 0])
                     origin_x = target["x"] + float(vector_offset[0])
@@ -524,9 +543,36 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                     end = point(origin_x + vx * vector_scale, origin_y + vy * vector_scale)
                     if math.hypot(end[0] - start[0], end[1] - start[1]) < 0.001:
                         end = (start[0] + 0.001, start[1], 0)
+                    maximum_length = max(0.1, float(overlay.data.get("maxScreenLength", 1.5)))
+                    screen_length = math.hypot(end[0] - start[0], end[1] - start[1])
+                    if screen_length > maximum_length:
+                        factor = maximum_length / screen_length
+                        end = (
+                            start[0] + (end[0] - start[0]) * factor,
+                            start[1] + (end[1] - start[1]) * factor,
+                            0,
+                        )
                     line.put_start_and_end_on(start, end)
                     if vector_label is not None:
-                        vector_label.next_to(line, direction=(0, 1, 0), buff=0.03)
+                        requested_direction = str(overlay.data.get("labelDirection", "")).lower()
+                        direction = {
+                            "up": UP,
+                            "down": DOWN,
+                            "left": LEFT,
+                            "right": RIGHT,
+                        }.get(requested_direction)
+                        if direction is None:
+                            direction = {
+                                "velocity": UP,
+                                "gravity": RIGHT,
+                                "force": DOWN,
+                                "normal": RIGHT,
+                                "friction": LEFT,
+                                "constraint": DOWN,
+                            }.get(str(overlay.data.get("source")), UP)
+                        vector_label.next_to(line, direction=direction, buff=0.055)
+                        label_offset = overlay.data.get("labelOffset", [0, 0])
+                        vector_label.shift((float(label_offset[0]), float(label_offset[1]), 0))
                 for line_data in line_overlays.values():
                     sampled = sample_overlay_track(line_data["track"], timestamp)
                     start = point(float(sampled["start_x"]), float(sampled["start_y"]))
@@ -570,6 +616,9 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                         float(overlay.data.get("opacity", 1.0))
                         * _overlay_opacity(overlay.data, timestamp, timeline.duration)
                     )
+                for group, active in vector_activity:
+                    if not active:
+                        group.set_opacity(0)
                 last_trail_frame[0] = frame_index
 
             # Animating a ValueTracker suspends that tracker's updaters in Manim.

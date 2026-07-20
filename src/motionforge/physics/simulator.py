@@ -108,7 +108,11 @@ def _add_constraints(space: pymunk.Space, spec: PhysicsSpec, bodies: dict[str, p
         space.add(constraint)
 
 
-def _external_forces(spec: PhysicsSpec, objects: dict[str, PhysicsObject]) -> dict[str, tuple[float, float]]:
+def _external_forces(
+    spec: PhysicsSpec,
+    objects: dict[str, PhysicsObject],
+    field_forces: dict[str, tuple[float, float]] | None = None,
+) -> dict[str, tuple[float, float]]:
     result: dict[str, tuple[float, float]] = {}
     for obj_id, obj in objects.items():
         if obj.is_static:
@@ -119,6 +123,57 @@ def _external_forces(spec: PhysicsSpec, objects: dict[str, PhysicsObject]) -> di
         for obj_id in force.applies_to:
             old_x, old_y = result[obj_id]
             result[obj_id] = (old_x + force.vector[0], old_y + force.vector[1])
+    for obj_id, (field_x, field_y) in (field_forces or {}).items():
+        old_x, old_y = result[obj_id]
+        result[obj_id] = (old_x + field_x, old_y + field_y)
+    return result
+
+
+def _force_field_forces(
+    spec: PhysicsSpec,
+    objects: dict[str, PhysicsObject],
+    bodies: dict[str, pymunk.Body],
+) -> dict[str, tuple[float, float]]:
+    """Evaluate position-dependent fields without coupling them to rendering."""
+
+    result = {obj_id: (0.0, 0.0) for obj_id in objects}
+    for field in spec.force_fields:
+        seen_mutual_pairs: set[tuple[str, str]] = set()
+        for source_id in dict.fromkeys(field.sources):
+            for target_id in dict.fromkeys(field.targets):
+                if source_id == target_id:
+                    continue
+                if field.mutual:
+                    pair = tuple(sorted((source_id, target_id)))
+                    if pair in seen_mutual_pairs:
+                        continue
+                    seen_mutual_pairs.add(pair)
+                source_body = bodies[source_id]
+                target_body = bodies[target_id]
+                delta_x = source_body.position.x - target_body.position.x
+                delta_y = source_body.position.y - target_body.position.y
+                distance_squared = delta_x * delta_x + delta_y * delta_y
+                if distance_squared < 1e-18:
+                    continue
+                softened_squared = distance_squared + field.softening * field.softening
+                magnitude = (
+                    field.strength
+                    * objects[source_id].mass
+                    * objects[target_id].mass
+                    / softened_squared
+                )
+                magnitude = min(field.max_force, magnitude)
+                if field.direction == "repel":
+                    magnitude = -magnitude
+                inverse_distance = 1 / math.sqrt(distance_squared)
+                force_x = magnitude * delta_x * inverse_distance
+                force_y = magnitude * delta_y * inverse_distance
+                if not objects[target_id].is_static:
+                    old_x, old_y = result[target_id]
+                    result[target_id] = (old_x + force_x, old_y + force_y)
+                if field.mutual and not objects[source_id].is_static:
+                    old_x, old_y = result[source_id]
+                    result[source_id] = (old_x - force_x, old_y - force_y)
     return result
 
 
@@ -197,7 +252,8 @@ def simulate(
         bodies[obj.id] = body
         shape_ids[shape] = obj.id
     _add_constraints(space, spec, bodies)
-    forces = _external_forces(spec, definitions)
+    field_forces = _force_field_forces(spec, definitions, bodies)
+    forces = _external_forces(spec, definitions, field_forces)
 
     events: list[TimelineEvent] = []
     current_time = [0.0]
@@ -242,11 +298,20 @@ def simulate(
             for force in spec.forces:
                 for obj_id in force.applies_to:
                     bodies[obj_id].apply_force_at_world_point(force.vector, bodies[obj_id].position)
+            field_forces = _force_field_forces(spec, definitions, bodies)
+            for obj_id, vector in field_forces.items():
+                if not definitions[obj_id].is_static:
+                    bodies[obj_id].apply_force_at_world_point(vector, bodies[obj_id].position)
             next_t = spec.duration if spec.duration - (t + step_dt) < 1e-12 else t + step_dt
             current_time[0] = float(next_t)
             space.step(step_dt)
             t = next_t
-            frame = _frame(t, spec, definitions, bodies, forces, prior_velocities, step_dt)
+            reported_forces = _external_forces(
+                spec,
+                definitions,
+                _force_field_forces(spec, definitions, bodies),
+            )
+            frame = _frame(t, spec, definitions, bodies, reported_forces, prior_velocities, step_dt)
             frames.append(frame)
             step_number += 1
             if settings.detect_events:

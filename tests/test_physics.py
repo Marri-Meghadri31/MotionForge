@@ -5,7 +5,7 @@ import unittest
 from threading import Event
 
 from motionforge.errors import ErrorCode, MotionForgeError
-from motionforge.models import PhysicsObject, PhysicsSpec, SimulationOptions
+from motionforge.models import ForceFieldSpec, PhysicsObject, PhysicsSpec, SimulationOptions
 from motionforge.physics.simulator import simulate
 
 
@@ -102,6 +102,54 @@ class PhysicsCorrectnessTests(unittest.TestCase):
         )
         result = simulate(spec)
         self.assertAlmostEqual(state(result, "box")["vx"], 5, delta=0.05)
+
+    def test_inverse_square_field_produces_a_closed_elliptical_orbit(self) -> None:
+        spec = PhysicsSpec(
+            gravity=(0, 0),
+            duration=10.5,
+            dt=1 / 240,
+            objects=[
+                PhysicsObject(
+                    id="sun",
+                    shape="circle",
+                    radius=26,
+                    position=(70, 0),
+                    mass=1_000,
+                    is_static=True,
+                    collision_group=9,
+                ),
+                PhysicsObject(
+                    id="planet",
+                    shape="circle",
+                    radius=11,
+                    position=(196.5, 0),
+                    velocity=(0, 234.6444901758),
+                    mass=1,
+                    collision_group=9,
+                ),
+            ],
+            force_fields=[
+                ForceFieldSpec(
+                    id="solar-gravity",
+                    type="inverseSquare",
+                    sources=["sun"],
+                    targets=["planet"],
+                    strength=4_803.3390699,
+                    softening=1,
+                    max_force=10_000,
+                )
+            ],
+        )
+        result = simulate(spec)
+        positions = [frame["objects"]["planet"] for frame in result.frames]
+        radii = [math.hypot(item["x"] - 70, item["y"]) for item in positions]
+        self.assertGreater(max(radii), 330)
+        self.assertLess(min(radii), 135)
+        self.assertLess(
+            math.hypot(positions[-1]["x"] - positions[0]["x"], positions[-1]["y"] - positions[0]["y"]),
+            8,
+        )
+        self.assertGreater(abs(positions[0]["force_x"]), 100)
 
     def test_cancellation_is_checked_before_simulation_work(self) -> None:
         cancellation = Event()

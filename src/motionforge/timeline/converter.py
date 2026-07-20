@@ -91,6 +91,7 @@ def build_timeline(scene: SceneSpec, result: SimulationResult, options: Simulati
             gravity=scene.physics.gravity,
             objects=static_scene_objects,
             constraints=scene.physics.constraints,
+            force_fields=scene.physics.force_fields,
             camera=scene.visual.camera,
             trail=scene.visual.trail,
         ),

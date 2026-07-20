@@ -1,6 +1,6 @@
 # MotionForge
 
-MotionForge is a renderer-independent physics visualization engine for the Velo tutor. It compiles a prompt or deterministic template into a bounded `SceneSpec`, simulates it with Pymunk, returns a compact interactive `Timeline` immediately, and performs optional Manim/FFmpeg MP4 export in an isolated worker.
+MotionForge is a renderer-independent physics visualization engine for the Velo tutor. It plans a prompt into a bounded, composable `SceneSpec`, simulates it with Pymunk, returns a compact interactive `Timeline` immediately, and performs optional Manim/FFmpeg MP4 export in an isolated worker.
 
 All application code lives in `src/motionforge`. The root `main.py` is only a compatibility launcher for older Velo builds.
 
@@ -13,10 +13,17 @@ uv run motionforge simulate scene.json -o timeline.json
 uv run motionforge export timeline.json -o projectile.mp4
 ```
 
-Common concepts use deterministic templates and do not require a model. Model-backed prompts default to Ollama and can use Anthropic explicitly:
+General scene planning is the default and uses Ollama unless another provider is selected:
 
 ```powershell
-uv run motionforge compile "a niche mechanics demonstration" --no-template --provider ollama --model llama3.1
+uv run motionforge compile "a red ball drops onto a 20 degree incline with friction" --provider ollama --model llama3.1
+```
+
+Deterministic templates are opt-in fast paths for offline or latency-sensitive use:
+
+```powershell
+uv run motionforge compile "show projectile motion" --prefer-template -o scene.json
+uv run motionforge compile "lamp shadow" --template lamp-shadow -o scene.json
 ```
 
 The legacy prompt-to-video command remains available:
@@ -24,6 +31,8 @@ The legacy prompt-to-video command remains available:
 ```powershell
 uv run prompt-animator "a ball drops and bounces" --quality low --output bounce
 ```
+
+This command shares the sidecar's versioned scene and timeline caches. Repeating an unchanged prompt and model skips model planning and simulation, and its stage output reports compile, simulation, render, and total timings.
 
 ## Persistent sidecar
 
@@ -62,9 +71,9 @@ See [Velo integration](docs/velo-integration.md) for the request sequence and Ca
 
 ```text
 prompt/parameters
-  -> compiler (template or structured provider)
+  -> structured scene planner (optional explicit template fast path)
   -> validated SceneSpec
-  -> fixed-step Pymunk simulation
+  -> fixed-step Pymunk simulation + declarative force fields
   -> compact renderer-neutral Timeline
        -> Velo Canvas playback
        -> isolated Manim worker -> FFmpeg H.264 MP4
@@ -75,7 +84,7 @@ Key modules:
 ```text
 src/motionforge/
 ├── api/          authenticated localhost HTTP + SSE
-├── compiler/     template classification, structured generation, safe repair
+├── compiler/     structured scene planning, optional templates, safe repair
 ├── jobs/         SQLite persistence, progress, cancellation, export queue
 ├── physics/      headless Pymunk simulation and educational events
 ├── providers/    Ollama and Anthropic capability abstraction
@@ -88,16 +97,30 @@ src/motionforge/
 
 Runtime data is written to the OS application-data directory, never the install directory. Override it with `MOTIONFORGE_DATA_DIR` for development or tests.
 
-## Deterministic templates
+## General scene composition
 
-The compiler recognizes falling/bouncing bodies, projectile motion, ramps and friction, pendulums, collisions and momentum, circular motion/orbits, force diagrams, springs/SHM, position/velocity/acceleration graphs, and lamp-post shadow/similar-triangle problems. Template parameters are validated and declared in the returned scene so a caller can safely re-simulate changes without another model call.
+The model planner composes scenes from bodies, geometry, contacts, material properties, constant forces, inverse-square force fields, springs, pins, measurements, and educational overlays. This means new prompts do not require a new Python scene function. For example, an elliptical orbit uses the same Pymunk body contract as a collision, with a declarative position-dependent force evaluated at every simulation step.
+
+Two non-template examples are included and can be rendered without a model or web application:
+
+```powershell
+uv run motionforge simulate examples/elliptical_orbit.scene.json -o orbit-timeline.json
+uv run motionforge export orbit-timeline.json -o elliptical-orbit.mp4 --quality high
+
+uv run motionforge simulate examples/red_ball_ramp.scene.json -o ramp-timeline.json
+uv run motionforge export ramp-timeline.json -o red-ball-ramp.mp4 --quality high
+```
+
+## Optional deterministic templates
+
+When `--prefer-template`, `preferTemplate:true`, or an explicit template ID is supplied, the compiler can use deterministic implementations for falling/bouncing bodies, projectile motion, ramps and friction, pendulums, collisions and momentum, circular motion, force diagrams, springs/SHM, motion graphs, and lamp-shadow problems. Template parameters are validated and declared in the returned scene so a caller can safely re-simulate changes without another model call.
 
 Geometry-heavy questions use the same pipeline as rigid-body scenes. Pymunk produces the authoritative object tracks; the timeline layer resolves object anchors, projected rays, line intersections, and measurements; Manim only renders those sampled results. This keeps shadows, optics rays, and relative-distance annotations synchronized with the physics.
 
 Render the lamp-post example directly, without starting the sidecar or a web app:
 
 ```powershell
-uv run motionforge compile "A 1.6 m person walks away from a 4 m lamp post at 60 cm/s; show the shadow speed relative to the person" -o lamp-shadow.json
+uv run motionforge compile "A 1.6 m person walks away from a 4 m lamp post at 60 cm/s; show the shadow speed relative to the person" --template lamp-shadow -o lamp-shadow.json
 uv run motionforge simulate lamp-shadow.json -o lamp-shadow-timeline.json
 uv run motionforge export lamp-shadow-timeline.json -o lamp-shadow.mp4 --quality high
 ```

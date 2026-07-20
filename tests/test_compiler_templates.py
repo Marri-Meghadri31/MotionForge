@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 import unittest
+from pathlib import Path
 from threading import Event
 
-from motionforge.compiler.scene_compiler import SceneCompiler, repair_scene_data
+from motionforge.compiler.scene_compiler import SYSTEM_PROMPT, SceneCompiler, repair_scene_data
 from motionforge.compiler.templates import TEMPLATES, classify_template, compile_template
 from motionforge.models import CompileRequest, SceneSpec
 from motionforge.errors import ErrorCode, MotionForgeError
@@ -99,6 +101,107 @@ class CompilerTests(unittest.TestCase):
         self.assertIn("floor", repaired["visual"]["objectStyles"])
         self.assertTrue(repaired["visual"]["trail"]["enabled"])
 
+    def test_safe_repair_normalizes_common_general_planner_aliases(self) -> None:
+        repaired = repair_scene_data(
+            {
+                "physics": {
+                    "duration": 2.5,
+                    "gravity": [0, 0],
+                    "objects": [
+                        {"id": "earth", "shape": "circle", "radius": 100, "mass": 10_000},
+                        {"id": "sat", "shape": "circle", "radius": 5, "position": [150, 0]},
+                    ],
+                    "forceFields": [
+                        {
+                            "type": "inverseSquare",
+                            "sourceId": "earth",
+                            "sourceMass": 10_000,
+                            "strength": 1,
+                        }
+                    ],
+                },
+                "visual": {
+                    "objectStyles": {"earth": {"color": "green"}},
+                    "overlays": [
+                        {"type": "label", "targetId": "earth", "text": "Earth"},
+                        {
+                            "type": "vector",
+                            "sourceId": "sat",
+                            "vectorType": "velocity",
+                            "scale": 5,
+                            "position": "topRight",
+                            "label": "v",
+                        },
+                        {
+                            "id": "legacyVelocity",
+                            "kind": "vector",
+                            "targetId": "sat",
+                            "data": {"property": "velocity"},
+                        },
+                        {
+                            "id": "satelliteName",
+                            "kind": "equation",
+                            "targetId": "sat",
+                            "label": "Satellite",
+                            "data": {"offset": [0, 12]},
+                        },
+                        {
+                            "id": "satelliteTrail",
+                            "type": "trail",
+                            "targetId": "sat",
+                            "maxLength": 300,
+                        },
+                    ],
+                    "trails": {"sat": {"maxLength": 200}},
+                },
+            }
+        )
+        scene = SceneSpec.model_validate(repaired)
+        field = scene.physics.force_fields[0]
+        self.assertEqual(field.id, "forceField1")
+        self.assertEqual(field.sources, ["earth"])
+        self.assertEqual(field.targets, ["sat"])
+        self.assertEqual(scene.visual.object_styles["earth"].label, "Earth")
+        self.assertTrue(scene.visual.object_styles["earth"].show_label)
+        self.assertTrue(scene.visual.trail.enabled)
+        self.assertEqual(scene.visual.trail.max_points, 300)
+        self.assertEqual(scene.visual.object_styles["sat"].label, "Satellite")
+        self.assertTrue(scene.visual.object_styles["sat"].show_label)
+        self.assertEqual(scene.visual.overlays[0].kind, "vector")
+        self.assertEqual(scene.visual.overlays[0].target_id, "sat")
+        self.assertEqual(scene.visual.overlays[0].data["source"], "velocity")
+        self.assertEqual(scene.visual.overlays[0].data["position"], "topRight")
+        self.assertEqual(scene.visual.overlays[1].data["source"], "velocity")
+
+    def test_safe_repair_rescales_oversized_mass_system_without_changing_motion(self) -> None:
+        repaired = repair_scene_data(
+            {
+                "physics": {
+                    "duration": 2,
+                    "gravity": [0, 0],
+                    "objects": [
+                        {"id": "source", "shape": "circle", "radius": 10, "mass": 1_000_000},
+                        {"id": "target", "shape": "circle", "radius": 2, "mass": 10},
+                    ],
+                    "forces": [{"appliesTo": ["target"], "vector": [100, 0]}],
+                    "forceFields": [
+                        {
+                            "id": "orbit",
+                            "type": "inverseSquare",
+                            "sources": ["source"],
+                            "targets": ["target"],
+                            "strength": 2,
+                        }
+                    ],
+                }
+            }
+        )
+        scene = SceneSpec.model_validate(repaired)
+        self.assertEqual(scene.physics.objects[0].mass, 100_000)
+        self.assertEqual(scene.physics.objects[1].mass, 1)
+        self.assertEqual(scene.physics.forces[0].vector, (10, 0))
+        self.assertEqual(scene.physics.force_fields[0].strength, 20)
+
     def test_model_compiler_uses_exact_schema_and_one_repair_call(self) -> None:
         valid = compile_template("falling-body", "fallback", {}).contract_dump()
         valid["metadata"] = {"origin": "model"}
@@ -110,6 +213,35 @@ class CompilerTests(unittest.TestCase):
         self.assertEqual(provider.calls, 2)
         self.assertIn("properties", provider.last_schema)
         self.assertEqual(scene.metadata.origin, "model")
+
+    def test_general_model_planner_is_default_and_knows_composable_force_fields(self) -> None:
+        valid = compile_template("projectile-motion", "fallback", {}).contract_dump()
+        valid["metadata"] = {"origin": "model"}
+        provider = FakeProvider([json.dumps(valid)])
+        scene = SceneCompiler(provider).compile(CompileRequest(prompt="projectile motion"), cancel_event=Event())
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(scene.metadata.origin, "model")
+        self.assertIn("forceFields", provider.last_schema["$defs"]["PhysicsSpec"]["properties"])
+        self.assertIn("inverseSquare", SYSTEM_PROMPT)
+
+    def test_non_template_model_scene_preserves_ball_color_angle_and_friction(self) -> None:
+        example = Path(__file__).parents[1] / "examples" / "red_ball_ramp.scene.json"
+        provider = FakeProvider([example.read_text(encoding="utf-8")])
+        scene = SceneCompiler(provider).compile(
+            CompileRequest(prompt="A red ball drops onto a 20 degree inclined ramp with friction"),
+            cancel_event=Event(),
+        )
+        ramp = next(obj for obj in scene.physics.objects if obj.id == "incline")
+        ball = next(obj for obj in scene.physics.objects if obj.id == "ball")
+        angle = math.degrees(
+            math.atan2(ramp.point_b[1] - ramp.point_a[1], ramp.point_b[0] - ramp.point_a[0])
+        )
+        self.assertEqual(scene.metadata.origin, "model")
+        self.assertAlmostEqual(angle, 20, places=6)
+        self.assertEqual(scene.visual.object_styles["ball"].color, "#D92D20")
+        self.assertEqual(scene.visual.object_styles["ball"].render_as, "ball")
+        self.assertGreater(ball.friction, 0)
+        self.assertGreater(ramp.friction, 0)
 
     def test_ollama_detects_legacy_json_format_capability(self) -> None:
         provider = OllamaProvider()
