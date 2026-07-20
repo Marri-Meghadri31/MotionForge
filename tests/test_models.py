@@ -5,7 +5,7 @@ import unittest
 
 from pydantic import ValidationError
 
-from motionforge.models import PhysicsObject, PhysicsSpec, SceneSpec, VisualSpec
+from motionforge.models import OverlaySpec, PhysicsObject, PhysicsSpec, PointReference, SceneSpec, VisualSpec
 
 
 class SchemaTests(unittest.TestCase):
@@ -51,6 +51,33 @@ class SchemaTests(unittest.TestCase):
     def test_segment_must_be_static(self) -> None:
         with self.assertRaises(ValidationError):
             PhysicsObject(id="floor", shape="segment", point_a=(-10, 0), point_b=(10, 0))
+
+    def test_derived_geometry_rejects_forward_overlay_references(self) -> None:
+        with self.assertRaises(ValidationError):
+            SceneSpec(
+                physics=PhysicsSpec(
+                    gravity=(0, 0),
+                    duration=1,
+                    objects=[PhysicsObject(id="walker", shape="box", width=1, height=2)],
+                ),
+                visual=VisualSpec(
+                    overlays=[
+                        OverlaySpec(
+                            id="measurement",
+                            kind="measurement",
+                            start=PointReference(object_id="walker", anchor="bottom"),
+                            end=PointReference(overlay_id="future", anchor="end"),
+                            operation="deltaX",
+                        ),
+                        OverlaySpec(
+                            id="future",
+                            kind="line",
+                            start=PointReference(point=(0, 0)),
+                            end=PointReference(point=(1, 0)),
+                        ),
+                    ]
+                ),
+            )
 
     def test_camel_case_contract_serialization(self) -> None:
         scene = SceneSpec(

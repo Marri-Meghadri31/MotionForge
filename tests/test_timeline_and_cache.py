@@ -9,7 +9,7 @@ from motionforge.compiler.templates import compile_template
 from motionforge.core import simulate_scene
 from motionforge.models import ObjectTrack
 from motionforge.render.manim_renderer import output_frame_times
-from motionforge.timeline.converter import from_legacy_keyframes, sample_track
+from motionforge.timeline.converter import from_legacy_keyframes, sample_overlay_track, sample_track
 
 
 class TimelineTests(unittest.TestCase):
@@ -48,6 +48,18 @@ class TimelineTests(unittest.TestCase):
             times = output_frame_times(3, fps)
             self.assertEqual(len(times), 3 * fps)
             self.assertAlmostEqual(times[-1], 3 - 1 / fps)
+
+    def test_geometry_tracks_follow_physics_and_measure_relative_shadow_speed(self) -> None:
+        timeline = simulate_scene(compile_template("lamp-shadow", "lamp post shadow", {}))
+        ray = timeline.overlay_tracks["light-ray"]
+        shadow = timeline.overlay_tracks["shadow-length"]
+        self.assertAlmostEqual(ray.end_x[0], 200)
+        self.assertAlmostEqual(ray.end_x[-1], 800)
+        self.assertAlmostEqual(shadow.value[0], 80)
+        self.assertAlmostEqual(shadow.value[-1], 320)
+        self.assertAlmostEqual((shadow.value[-1] - shadow.value[0]) / timeline.duration, 40)
+        halfway = sample_overlay_track(shadow, timeline.duration / 2)
+        self.assertAlmostEqual(float(halfway["value"]), 200)
 
 
 class CacheTests(unittest.TestCase):

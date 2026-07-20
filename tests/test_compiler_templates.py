@@ -42,7 +42,7 @@ class FakeProvider(Provider):
 
 class CompilerTests(unittest.TestCase):
     def test_all_documented_template_families_compile(self) -> None:
-        self.assertEqual(len(TEMPLATES), 9)
+        self.assertEqual(len(TEMPLATES), 10)
         for template_id in TEMPLATES:
             with self.subTest(template=template_id):
                 scene = compile_template(template_id, template_id, {})
@@ -58,6 +58,7 @@ class CompilerTests(unittest.TestCase):
             "two carts collide and exchange momentum": "collision-momentum",
             "launch a projectile at 45 degrees": "projectile-motion",
             "free body force vector diagram": "force-diagram",
+            "a person walks away from a lamp post and casts a shadow": "lamp-shadow",
         }
         for prompt, expected in cases.items():
             self.assertEqual(classify_template(prompt), expected)
@@ -70,6 +71,16 @@ class CompilerTests(unittest.TestCase):
         self.assertEqual(scene.visual.title, "Linear motion graphs")
         acceleration = next(parameter for parameter in scene.parameters if parameter.id == "acceleration")
         self.assertEqual(acceleration.default, 0)
+
+    def test_lamp_shadow_template_preserves_question_units_and_answer(self) -> None:
+        scene = compile_template(
+            "lamp-shadow",
+            "A 1.6 m person walks away from a 4 m lamp at 60 cm/s",
+            {},
+        )
+        self.assertEqual(scene.visual.units, "centimetres")
+        self.assertEqual(scene.physics.objects[2].velocity, (60, 0))
+        self.assertIn("40 cm/s", scene.visual.overlays[-1].label)
 
     def test_safe_repair_adds_styles_normalizes_colors_and_clamps(self) -> None:
         repaired = repair_scene_data(

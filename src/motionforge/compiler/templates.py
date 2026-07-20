@@ -17,6 +17,7 @@ from motionforge.models import (
     ParameterSpec,
     PhysicsObject,
     PhysicsSpec,
+    PointReference,
     SceneSpec,
     TrailSpec,
     VisualSpec,
@@ -46,6 +47,10 @@ def _scene(
     *,
     title: str,
     camera: tuple[float, float] = (0, 150),
+    camera_zoom: float = 1.0,
+    scene_size: tuple[int, int] = (800, 500),
+    units: str = "pixels",
+    background: str = "#FFFFFF",
     trail: bool = False,
     overlays: list[OverlaySpec] | None = None,
     parameters: list[ParameterSpec] | None = None,
@@ -55,9 +60,12 @@ def _scene(
         description=prompt[:1_000],
         physics=physics,
         visual=VisualSpec(
+            scene_size=scene_size,
+            units=units,
             object_styles=styles,
+            background_color=background,
             title=title,
-            camera=CameraSpec(center=camera),
+            camera=CameraSpec(center=camera, zoom=camera_zoom),
             trail=TrailSpec(enabled=trail, max_points=300, sample_every=2),
             overlays=overlays or [],
         ),
@@ -317,6 +325,196 @@ def motion_graph(prompt: str, values: dict[str, Any]) -> SceneSpec:
     )
 
 
+def lamp_shadow(prompt: str, values: dict[str, Any]) -> SceneSpec:
+    """Similar-triangle visualization driven by a Pymunk body track.
+
+    Coordinates are centimetres, so the learner's stated walking speed can be
+    fed to Pymunk without a hidden conversion. Geometry overlays derive the ray
+    intersection and measurements from the resulting person track.
+    """
+
+    lamp_height_m = _number(values, "lamp_height", 4.0, 2.5, 10.0)
+    person_height_m = _number(values, "person_height", 1.6, 0.8, 2.2)
+    if person_height_m >= lamp_height_m - 0.3:
+        raise ValueError("lamp_height must exceed person_height by at least 0.3 m")
+    speed = _number(values, "speed", 60.0, 5.0, 180.0)
+    initial_distance = _number(values, "initial_distance", 120.0, 40.0, 400.0)
+    duration = _number(values, "duration", 6.0, 2.0, 8.0)
+    lamp_height = lamp_height_m * 100
+    person_height = person_height_m * 100
+    shadow_ratio = person_height / (lamp_height - person_height)
+    tip_ratio = 1 + shadow_ratio
+    relative_speed = shadow_ratio * speed
+    person_end = initial_distance + speed * duration
+    tip_end = tip_ratio * person_end
+    world_left = -max(80.0, lamp_height * 0.2)
+    world_right = tip_end + 55
+    world_width = world_right - world_left
+    camera_zoom = min(1.0, 920.0 / world_width)
+    camera_center = ((world_left + world_right) / 2, lamp_height / 2 + 15)
+
+    literal = lambda x, y: PointReference(point=(x, y))
+    anchor = lambda object_id, name, offset=(0.0, 0.0): PointReference(
+        object_id=object_id,
+        anchor=name,
+        offset=offset,
+    )
+    derived = lambda overlay_id, name: PointReference(overlay_id=overlay_id, anchor=name)
+    lamp_text = f"{lamp_height_m:g} m"
+    person_text = f"{person_height_m:g} m"
+    ratio_text = f"{person_height_m:g}/({lamp_height_m:g} - {person_height_m:g})"
+    relative_text = f"{relative_speed:g} cm/s"
+
+    return _scene(
+        "lamp-shadow",
+        prompt,
+        PhysicsSpec(
+            gravity=(0, 0),
+            duration=duration,
+            dt=1 / 60,
+            objects=[
+                PhysicsObject(
+                    id="lamp",
+                    shape="segment",
+                    point_a=(0, 0),
+                    point_b=(0, lamp_height),
+                    segment_radius=5,
+                    is_static=True,
+                    inspectable=False,
+                ),
+                PhysicsObject(
+                    id="light",
+                    shape="circle",
+                    radius=12,
+                    position=(0, lamp_height),
+                    is_static=True,
+                    inspectable=False,
+                    collision_group=7,
+                ),
+                PhysicsObject(
+                    id="person",
+                    shape="box",
+                    width=42,
+                    height=person_height,
+                    position=(initial_distance, person_height / 2),
+                    velocity=(speed, 0),
+                    mass=70,
+                    friction=0,
+                    restitution=0,
+                    collision_group=7,
+                ),
+            ],
+        ),
+        {
+            "lamp": ObjectStyle(color="#344054", opacity=1, stroke_width=5, render_as="lamp"),
+            "light": ObjectStyle(color="#F5B700", opacity=1, stroke_width=2, render_as="light"),
+            "person": ObjectStyle(color="#176B87", opacity=1, stroke_width=3, render_as="person"),
+        },
+        title="How fast does the shadow grow relative to the walker?",
+        camera=camera_center,
+        camera_zoom=camera_zoom,
+        scene_size=(1000, 560),
+        units="centimetres",
+        background="#F7FAFC",
+        overlays=[
+            OverlaySpec(
+                id="ground",
+                kind="line",
+                color="#667085",
+                start=literal(world_left, 0),
+                end=literal(world_right, 0),
+                operation="connect",
+                data={"strokeWidth": 3, "zIndex": -5},
+            ),
+            OverlaySpec(
+                id="light-ray",
+                kind="line",
+                color="#EAAA08",
+                start=anchor("light", "center"),
+                end=anchor("person", "top"),
+                operation="extendToY",
+                data={"targetY": 0, "strokeWidth": 3, "opacity": 0.8, "startTime": 0.45, "fadeDuration": 0.35, "endMarker": True, "zIndex": -1},
+            ),
+            OverlaySpec(
+                id="shadow",
+                kind="line",
+                color="#344054",
+                start=anchor("person", "bottom"),
+                end=derived("light-ray", "end"),
+                operation="connect",
+                data={"strokeWidth": 12, "opacity": 0.24, "startTime": 0.45, "fadeDuration": 0.35, "zIndex": -2},
+            ),
+            OverlaySpec(
+                id="distance-x",
+                kind="measurement",
+                label="x",
+                color="#175CD3",
+                start=literal(0, 0),
+                end=anchor("person", "bottom"),
+                operation="deltaX",
+                data={"prefix": "x = ", "suffix": " cm", "offset": [0, -48], "decimals": 0, "startTime": 1.0, "fadeDuration": 0.3},
+            ),
+            OverlaySpec(
+                id="shadow-length",
+                kind="measurement",
+                label="s",
+                color="#7A5AF8",
+                start=anchor("person", "bottom"),
+                end=derived("light-ray", "end"),
+                operation="deltaX",
+                data={"prefix": "s = ", "suffix": " cm", "offset": [0, -18], "decimals": 0, "startTime": 1.0, "fadeDuration": 0.3},
+            ),
+            OverlaySpec(
+                id="lamp-height",
+                kind="measurement",
+                color="#475467",
+                start=literal(0, 0),
+                end=anchor("light", "center"),
+                operation="deltaY",
+                data={"prefix": "", "suffix": " m", "valueScale": 0.01, "offset": [-32, 0], "decimals": 1, "fixedLabel": lamp_text},
+            ),
+            OverlaySpec(
+                id="person-height",
+                kind="measurement",
+                color="#176B87",
+                start=anchor("person", "bottom"),
+                end=anchor("person", "top"),
+                operation="deltaY",
+                data={"prefix": "", "suffix": " m", "valueScale": 0.01, "offset": [30, 0], "decimals": 1, "fixedLabel": person_text},
+            ),
+            OverlaySpec(
+                id="walking-speed",
+                kind="vector",
+                target_id="person",
+                label=f"{speed:g} cm/s",
+                color="#12B76A",
+                data={"source": "velocity", "scale": 0.9, "offset": [0, person_height * 0.62], "startTime": 0.2, "fadeDuration": 0.3},
+            ),
+            OverlaySpec(
+                id="similar-triangles",
+                kind="equation",
+                label=(
+                    "Similar triangles\n"
+                    f"s / x = {ratio_text}\n"
+                    f"ds/dt = {ratio_text} × {speed:g}"
+                ),
+                color="#344054",
+                data={"screenPosition": "topRight", "panel": True, "fontSize": 22, "startTime": 1.6, "fadeDuration": 0.45},
+            ),
+            OverlaySpec(
+                id="answer",
+                kind="equation",
+                label=f"Relative to the person:  {relative_text}",
+                color="#067647",
+                data={"screenPosition": "bottomRight", "panel": True, "emphasis": True, "fontSize": 24, "startTime": 4.35, "fadeDuration": 0.45},
+            ),
+        ],
+        parameters=[
+            ParameterSpec(id="lamp_height", path="physics.objects[lamp].pointB.y", default=lamp_height_m, minimum=2.5, maximum=10, unit="m"),
+            ParameterSpec(id="person_height", path="physics.objects[person].height", default=person_height_m, minimum=0.8, maximum=2.2, unit="m"),
+            ParameterSpec(id="speed", path="physics.objects[person].velocity.x", default=speed, minimum=5, maximum=180, unit="cm/s"),
+        ],
+    )
 TEMPLATES: dict[str, Template] = {
     "falling-body": falling_body,
     "projectile-motion": projectile,
@@ -327,9 +525,11 @@ TEMPLATES: dict[str, Template] = {
     "force-diagram": force_diagram,
     "spring-shm": spring,
     "motion-graphs": motion_graph,
+    "lamp-shadow": lamp_shadow,
 }
 
 CLASSIFIERS: list[tuple[str, re.Pattern[str]]] = [
+    ("lamp-shadow", re.compile(r"\b(shadow|lamp[ -]?post|streetlight)\w*\b", re.I)),
     (
         "motion-graphs",
         re.compile(

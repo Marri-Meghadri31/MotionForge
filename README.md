@@ -90,7 +90,19 @@ Runtime data is written to the OS application-data directory, never the install 
 
 ## Deterministic templates
 
-The compiler recognizes falling/bouncing bodies, projectile motion, ramps and friction, pendulums, collisions and momentum, circular motion/orbits, force diagrams, springs/SHM, and position/velocity/acceleration graphs. Template parameters are validated and declared in the returned scene so Velo can safely re-simulate changes without another model call.
+The compiler recognizes falling/bouncing bodies, projectile motion, ramps and friction, pendulums, collisions and momentum, circular motion/orbits, force diagrams, springs/SHM, position/velocity/acceleration graphs, and lamp-post shadow/similar-triangle problems. Template parameters are validated and declared in the returned scene so a caller can safely re-simulate changes without another model call.
+
+Geometry-heavy questions use the same pipeline as rigid-body scenes. Pymunk produces the authoritative object tracks; the timeline layer resolves object anchors, projected rays, line intersections, and measurements; Manim only renders those sampled results. This keeps shadows, optics rays, and relative-distance annotations synchronized with the physics.
+
+Render the lamp-post example directly, without starting the sidecar or a web app:
+
+```powershell
+uv run motionforge compile "A 1.6 m person walks away from a 4 m lamp post at 60 cm/s; show the shadow speed relative to the person" -o lamp-shadow.json
+uv run motionforge simulate lamp-shadow.json -o lamp-shadow-timeline.json
+uv run motionforge export lamp-shadow-timeline.json -o lamp-shadow.mp4 --quality high
+```
+
+The similar-triangle relation is `s/x = 1.6/(4 - 1.6) = 2/3`, so the shadow tip moves at **40 cm/s relative to the person** (and 100 cm/s relative to the ground).
 
 ## Build an executable
 

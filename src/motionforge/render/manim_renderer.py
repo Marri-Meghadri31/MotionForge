@@ -15,9 +15,7 @@ from typing import Any
 from motionforge.errors import ErrorCode, MotionForgeError
 from motionforge.constants import MAX_EXPORT_BYTES
 from motionforge.models import ExportOptions, ExportResult, Timeline
-from motionforge.timeline.converter import sample_timeline
-
-BASE_SCALE = 1 / 60
+from motionforge.timeline.converter import sample_overlay_track, sample_timeline
 
 
 def output_frame_times(duration: float, fps: int) -> list[float]:
@@ -142,7 +140,34 @@ def render_video(
 
 def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancelled: Event) -> Path:
     # Importing Manim is deliberately isolated from sidecar startup and preview work.
-    from manim import BLACK, WHITE, Circle, Line, ManimColor, Polygon, Rectangle, Scene, Text, UpdateFromAlphaFunc, VGroup, VMobject, linear, tempconfig
+    from manim import (
+        BLACK,
+        DL,
+        DOWN,
+        DR,
+        LEFT,
+        RIGHT,
+        UL,
+        UP,
+        UR,
+        WHITE,
+        Arrow,
+        Circle,
+        DecimalNumber,
+        DoubleArrow,
+        Line,
+        ManimColor,
+        Polygon,
+        Rectangle,
+        RoundedRectangle,
+        Scene,
+        Text,
+        UpdateFromAlphaFunc,
+        VGroup,
+        VMobject,
+        linear,
+        tempconfig,
+    )
 
     workspace = Path(tempfile.mkdtemp(prefix="motionforge-export-"))
 
@@ -152,7 +177,8 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
             self.camera.background_color = background
             zoom = timeline.scene.camera.zoom
             centre = timeline.scene.camera.center
-            scale = BASE_SCALE * zoom
+            logical_width, logical_height = timeline.scene.size
+            scale = min(13.45 / logical_width, 7.0 / logical_height) * zoom
 
             def point(x: float, y: float):
                 return ((x - centre[0]) * scale, (y - centre[1]) * scale, 0)
@@ -164,7 +190,9 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                 return point(world_x, world_y)
 
             label_color = WHITE if _is_dark(timeline.scene.background) else BLACK
+            panel_color = ManimColor("#182230" if _is_dark(timeline.scene.background) else "#FFFFFF")
             shapes: dict[str, Any] = {}
+            people: dict[str, dict[str, Any]] = {}
             labels: dict[str, Any] = {}
             trails: dict[str, Any] = {}
             trail_points: dict[str, deque] = {}
@@ -172,7 +200,71 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
             for obj_id, definition in timeline.scene.objects.items():
                 state = initial[obj_id]
                 color = ManimColor(definition.color)
-                if definition.shape == "circle":
+                if definition.render_as == "person":
+                    body_width = max((definition.width or 32) * scale, 0.35)
+                    body_height = max((definition.height or 120) * scale, 1.2)
+                    head_radius = min(body_width * 0.32, body_height * 0.105)
+                    head_y = body_height / 2 - head_radius
+                    shoulder_y = head_y - head_radius * 1.45
+                    hip_y = -body_height * 0.16
+                    foot_y = -body_height / 2
+                    head = Circle(
+                        radius=head_radius,
+                        color=color,
+                        fill_color=color,
+                        fill_opacity=0.18,
+                        stroke_width=max(2, definition.stroke_width),
+                    ).move_to((0, head_y, 0))
+                    torso = Line((0, shoulder_y, 0), (0, hip_y, 0), color=color, stroke_width=5)
+                    left_arm = Line((0, shoulder_y * 0.94, 0), (-body_width * 0.46, hip_y * 0.35, 0), color=color, stroke_width=4)
+                    right_arm = Line((0, shoulder_y * 0.94, 0), (body_width * 0.46, hip_y * 0.35, 0), color=color, stroke_width=4)
+                    left_leg = Line((0, hip_y, 0), (-body_width * 0.36, foot_y, 0), color=color, stroke_width=4)
+                    right_leg = Line((0, hip_y, 0), (body_width * 0.36, foot_y, 0), color=color, stroke_width=4)
+                    arms = VGroup(left_arm, right_arm)
+                    legs = VGroup(left_leg, right_leg)
+                    shape = VGroup(head, torso, arms, legs)
+                    people[obj_id] = {
+                        "head": head,
+                        "torso": torso,
+                        "left_arm": left_arm,
+                        "right_arm": right_arm,
+                        "left_leg": left_leg,
+                        "right_leg": right_leg,
+                        "width": body_width,
+                        "height": body_height,
+                        "head_y": head_y,
+                        "shoulder_y": shoulder_y,
+                        "hip_y": hip_y,
+                        "foot_y": foot_y,
+                    }
+                elif definition.render_as == "light":
+                    radius = max((definition.radius or 8) * scale, 0.1)
+                    core = Circle(radius=radius, color=color, fill_color=color, fill_opacity=0.95, stroke_width=2)
+                    halo = Circle(radius=radius * 1.75, color=color, fill_color=color, fill_opacity=0.09, stroke_opacity=0.25)
+                    rays = VGroup()
+                    for index in range(8):
+                        angle = index * math.tau / 8
+                        rays.add(
+                            Line(
+                                (math.cos(angle) * radius * 1.3, math.sin(angle) * radius * 1.3, 0),
+                                (math.cos(angle) * radius * 2.0, math.sin(angle) * radius * 2.0, 0),
+                                color=color,
+                                stroke_width=2,
+                            )
+                        )
+                    shape = VGroup(halo, rays, core)
+                elif definition.render_as == "lamp" and definition.shape == "segment":
+                    pa = segment_point(definition.point_a or (0, 0), state)
+                    pb = segment_point(definition.point_b or (1, 0), state)
+                    pole = Line(pa, pb, color=color, stroke_width=max(5, definition.stroke_width))
+                    base = Line(
+                        (pa[0] - 0.16, pa[1], 0),
+                        (pa[0] + 0.16, pa[1], 0),
+                        color=color,
+                        stroke_width=max(5, definition.stroke_width),
+                    )
+                    shape = VGroup(pole, base)
+                elif definition.shape == "circle":
                     shape = Circle(radius=max((definition.radius or 1) * scale, 0.025), color=color, fill_color=color, fill_opacity=definition.opacity, stroke_width=definition.stroke_width)
                 elif definition.shape == "box":
                     shape = Rectangle(width=(definition.width or 1) * scale, height=(definition.height or 1) * scale, color=color, fill_color=color, fill_opacity=definition.opacity, stroke_width=definition.stroke_width)
@@ -185,6 +277,7 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                 if definition.shape != "segment":
                     shape.rotate(state["angle"])
                     shape.move_to(point(state["x"], state["y"]))
+                shape.set_z_index(0)
                 shapes[obj_id] = shape
                 self.add(shape)
                 if definition.show_label and definition.label:
@@ -199,14 +292,20 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                     self.add(trail)
 
             if timeline.scene.title:
-                title = Text(timeline.scene.title, font_size=30, color=label_color)
-                title.to_edge((0, 1, 0))
-                self.add(title)
+                title = Text(timeline.scene.title, font_size=28, color=label_color)
+                title.to_edge(UP, buff=0.16)
+                title_rule = Line((-6.45, title.get_bottom()[1] - 0.1, 0), (6.45, title.get_bottom()[1] - 0.1, 0), color=ManimColor("#D0D5DD"), stroke_width=1)
+                self.add(title_rule, title)
 
             vector_overlays: dict[str, tuple[Any, Any | None, Any]] = {}
             constraint_overlays: dict[str, tuple[Any, Any]] = {}
             highlight_overlays: dict[str, tuple[Any, str]] = {}
             graph_overlays: dict[str, dict[str, Any]] = {}
+            line_overlays: dict[str, dict[str, Any]] = {}
+            measurement_overlays: dict[str, dict[str, Any]] = {}
+            timed_groups: list[tuple[Any, Any]] = []
+            dynamic_overlay_groups: list[Any] = []
+            dynamic_measurement_groups: list[Any] = []
             bottom_slot = 0
             for overlay_id, overlay_track in timeline.overlay_tracks.items():
                 overlay = overlay_track.overlay
@@ -214,12 +313,17 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                     continue
                 color = ManimColor(overlay.color)
                 if overlay.kind == "vector" and overlay.target_id in initial:
-                    origin = point(initial[overlay.target_id]["x"], initial[overlay.target_id]["y"])
-                    line = Line(origin, (origin[0] + 0.001, origin[1], 0), color=color, stroke_width=4)
+                    vector_offset = overlay.data.get("offset", [0, 0])
+                    origin = point(
+                        initial[overlay.target_id]["x"] + float(vector_offset[0]),
+                        initial[overlay.target_id]["y"] + float(vector_offset[1]),
+                    )
+                    line = Arrow(origin, (origin[0] + 0.01, origin[1], 0), color=color, stroke_width=4, buff=0)
                     vector_label = Text(overlay.label, font_size=16, color=color) if overlay.label else None
-                    self.add(line)
-                    if vector_label is not None:
-                        self.add(vector_label)
+                    group = VGroup(line, *([vector_label] if vector_label is not None else []))
+                    self.add(group)
+                    timed_groups.append((group, overlay))
+                    dynamic_overlay_groups.append(group)
                     vector_overlays[overlay_id] = (line, vector_label, overlay)
                 elif overlay.kind == "path" and isinstance(overlay.data.get("constraint"), str):
                     constraint = next((item for item in timeline.scene.constraints if item.id == overlay.data["constraint"]), None)
@@ -232,11 +336,93 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                         )
                         self.add(line)
                         constraint_overlays[overlay_id] = (line, constraint)
+                elif overlay.kind == "line" and overlay_track.times:
+                    sampled = sample_overlay_track(overlay_track, 0)
+                    start = point(float(sampled["start_x"]), float(sampled["start_y"]))
+                    end = point(float(sampled["end_x"]), float(sampled["end_y"]))
+                    line = Line(
+                        start,
+                        end,
+                        color=color,
+                        stroke_width=float(overlay.data.get("strokeWidth", 3)),
+                    )
+                    line.set_z_index(int(overlay.data.get("zIndex", -1)))
+                    marker = None
+                    if overlay.data.get("endMarker"):
+                        marker = Circle(radius=0.055, color=color, fill_color=color, fill_opacity=1, stroke_width=1)
+                        marker.move_to(end)
+                        marker.set_z_index(int(overlay.data.get("zIndex", -1)) + 1)
+                    group = VGroup(line, *([marker] if marker is not None else []))
+                    self.add(group)
+                    timed_groups.append((group, overlay))
+                    dynamic_overlay_groups.append(group)
+                    line_overlays[overlay_id] = {"line": line, "marker": marker, "track": overlay_track}
+                elif overlay.kind == "measurement" and overlay_track.times:
+                    sampled = sample_overlay_track(overlay_track, 0)
+                    offset = overlay.data.get("offset", [0, 0])
+                    offset_x, offset_y = float(offset[0]), float(offset[1])
+                    start = point(float(sampled["start_x"]) + offset_x, float(sampled["start_y"]) + offset_y)
+                    end = point(float(sampled["end_x"]) + offset_x, float(sampled["end_y"]) + offset_y)
+                    arrow = DoubleArrow(start, end, color=color, stroke_width=2, buff=0, tip_length=0.1)
+                    fixed_label = overlay.data.get("fixedLabel")
+                    number = None
+                    if fixed_label:
+                        value_label = Text(str(fixed_label), font_size=15, color=color)
+                    else:
+                        decimals = int(overlay.data.get("decimals", 1))
+                        number = DecimalNumber(
+                            float(sampled.get("value", 0)) * float(overlay.data.get("valueScale", 1)),
+                            num_decimal_places=decimals,
+                            font_size=15,
+                            color=color,
+                        )
+                        prefix = Text(str(overlay.data.get("prefix", "")), font_size=15, color=color)
+                        suffix = Text(str(overlay.data.get("suffix", "")), font_size=15, color=color)
+                        value_label = VGroup(prefix, number, suffix).arrange(RIGHT, buff=0.025)
+                    _place_measurement_label(value_label, arrow, start, end, offset_x, offset_y, UP, DOWN, LEFT, RIGHT)
+                    group = VGroup(arrow, value_label)
+                    self.add(group)
+                    timed_groups.append((group, overlay))
+                    dynamic_measurement_groups.append(group)
+                    measurement_overlays[overlay_id] = {
+                        "arrow": arrow,
+                        "label": value_label,
+                        "number": number,
+                        "track": overlay_track,
+                        "offset": (offset_x, offset_y),
+                    }
                 elif overlay.kind == "equation" and overlay.label:
-                    equation = Text(overlay.label, font_size=18, color=color)
-                    equation.to_edge((0, -1, 0)).shift((0, bottom_slot * 0.35, 0))
-                    bottom_slot += 1
-                    self.add(equation)
+                    equation = Text(
+                        overlay.label,
+                        font_size=int(overlay.data.get("fontSize", 18)),
+                        color=color,
+                        line_spacing=0.8,
+                    )
+                    if overlay.data.get("panel"):
+                        panel = RoundedRectangle(
+                            width=equation.width + 0.42,
+                            height=equation.height + 0.3,
+                            corner_radius=0.12,
+                            color=color,
+                            stroke_width=2.5 if overlay.data.get("emphasis") else 1.2,
+                            fill_color=panel_color,
+                            fill_opacity=0.94,
+                        )
+                        equation_group = VGroup(panel, equation)
+                    else:
+                        equation_group = VGroup(equation)
+                    screen_position = overlay.data.get("screenPosition")
+                    corners = {"topRight": UR, "topLeft": UL, "bottomRight": DR, "bottomLeft": DL}
+                    if screen_position in corners:
+                        equation_group.to_corner(corners[screen_position], buff=0.26)
+                        if str(screen_position).startswith("top"):
+                            equation_group.shift(DOWN * 0.48)
+                    else:
+                        equation_group.to_edge(DOWN, buff=0.2).shift(UP * (bottom_slot * 0.4))
+                        bottom_slot += 1
+                    self.add(equation_group)
+                    timed_groups.append((equation_group, overlay))
+                    dynamic_overlay_groups.append(equation_group)
                 elif overlay.kind == "highlight" and overlay.target_id in shapes:
                     highlight = Circle(radius=max(shapes[overlay.target_id].width, shapes[overlay.target_id].height) * 0.7, color=color, stroke_width=3)
                     highlight.move_to(shapes[overlay.target_id])
@@ -276,9 +462,46 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                     if definition.is_static:
                         continue
                     shape = shapes[obj_id]
-                    shape.move_to(point(state["x"], state["y"]))
-                    delta = (state["angle"] - previous_angles[obj_id] + math.pi) % (2 * math.pi) - math.pi
-                    shape.rotate(delta)
+                    if obj_id in people:
+                        person = people[obj_id]
+                        cosine, sine = math.cos(state["angle"]), math.sin(state["angle"])
+                        centre_point = point(state["x"], state["y"])
+
+                        def person_point(local_x: float, local_y: float) -> tuple[float, float, float]:
+                            return (
+                                centre_point[0] + local_x * cosine - local_y * sine,
+                                centre_point[1] + local_x * sine + local_y * cosine,
+                                0,
+                            )
+
+                        stride = max((definition.width or 40) * 1.5, 1.0)
+                        gait = math.sin(state["x"] / stride * math.tau) if abs(state.get("vx", 0)) > 0.01 else 0.0
+                        lift_left = max(0.0, gait) * person["height"] * 0.035
+                        lift_right = max(0.0, -gait) * person["height"] * 0.035
+                        shoulder = person_point(0, person["shoulder_y"])
+                        hip = person_point(0, person["hip_y"])
+                        person["head"].move_to(person_point(0, person["head_y"]))
+                        person["torso"].put_start_and_end_on(shoulder, hip)
+                        person["left_arm"].put_start_and_end_on(
+                            shoulder,
+                            person_point(-person["width"] * (0.38 + 0.16 * gait), person["hip_y"] * 0.35),
+                        )
+                        person["right_arm"].put_start_and_end_on(
+                            shoulder,
+                            person_point(person["width"] * (0.38 - 0.16 * gait), person["hip_y"] * 0.35),
+                        )
+                        person["left_leg"].put_start_and_end_on(
+                            hip,
+                            person_point(-person["width"] * (0.3 + 0.2 * gait), person["foot_y"] + lift_left),
+                        )
+                        person["right_leg"].put_start_and_end_on(
+                            hip,
+                            person_point(person["width"] * (0.3 - 0.2 * gait), person["foot_y"] + lift_right),
+                        )
+                    else:
+                        shape.move_to(point(state["x"], state["y"]))
+                        delta = (state["angle"] - previous_angles[obj_id] + math.pi) % (2 * math.pi) - math.pi
+                        shape.rotate(delta)
                     previous_angles[obj_id] = state["angle"]
                     if obj_id in labels:
                         labels[obj_id].next_to(shape, direction=(0, 1, 0), buff=0.08)
@@ -294,13 +517,46 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                     target = states[overlay.target_id]
                     vx, vy = _overlay_vector(overlay.data.get("source"), target, timeline, overlay.target_id)
                     vector_scale = float(overlay.data.get("scale", 0.1))
-                    start = point(target["x"], target["y"])
-                    end = point(target["x"] + vx * vector_scale, target["y"] + vy * vector_scale)
+                    vector_offset = overlay.data.get("offset", [0, 0])
+                    origin_x = target["x"] + float(vector_offset[0])
+                    origin_y = target["y"] + float(vector_offset[1])
+                    start = point(origin_x, origin_y)
+                    end = point(origin_x + vx * vector_scale, origin_y + vy * vector_scale)
                     if math.hypot(end[0] - start[0], end[1] - start[1]) < 0.001:
                         end = (start[0] + 0.001, start[1], 0)
                     line.put_start_and_end_on(start, end)
                     if vector_label is not None:
                         vector_label.next_to(line, direction=(0, 1, 0), buff=0.03)
+                for line_data in line_overlays.values():
+                    sampled = sample_overlay_track(line_data["track"], timestamp)
+                    start = point(float(sampled["start_x"]), float(sampled["start_y"]))
+                    end = point(float(sampled["end_x"]), float(sampled["end_y"]))
+                    line_data["line"].put_start_and_end_on(start, end)
+                    if line_data["marker"] is not None:
+                        line_data["marker"].move_to(end)
+                for measurement in measurement_overlays.values():
+                    sampled = sample_overlay_track(measurement["track"], timestamp)
+                    offset_x, offset_y = measurement["offset"]
+                    start = point(float(sampled["start_x"]) + offset_x, float(sampled["start_y"]) + offset_y)
+                    end = point(float(sampled["end_x"]) + offset_x, float(sampled["end_y"]) + offset_y)
+                    measurement["arrow"].put_start_and_end_on(start, end)
+                    if measurement["number"] is not None:
+                        overlay = measurement["track"].overlay
+                        measurement["number"].set_value(
+                            float(sampled.get("value", 0)) * float(overlay.data.get("valueScale", 1))
+                        )
+                    _place_measurement_label(
+                        measurement["label"],
+                        measurement["arrow"],
+                        start,
+                        end,
+                        offset_x,
+                        offset_y,
+                        UP,
+                        DOWN,
+                        LEFT,
+                        RIGHT,
+                    )
                 for line, constraint in constraint_overlays.values():
                     start_state = states[constraint.object_a]
                     end_state = states[constraint.object_b]
@@ -309,6 +565,11 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
                     highlight.move_to(shapes[target_id])
                 for graph in graph_overlays.values():
                     _update_graph(graph, timestamp, timeline.duration)
+                for group, overlay in timed_groups:
+                    group.set_opacity(
+                        float(overlay.data.get("opacity", 1.0))
+                        * _overlay_opacity(overlay.data, timestamp, timeline.duration)
+                    )
                 last_trail_frame[0] = frame_index
 
             # Animating a ValueTracker suspends that tracker's updaters in Manim.
@@ -316,17 +577,19 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
             # objects as a static background. Make every mutable visual part of
             # the animated group so the renderer redraws timeline changes.
             dynamic_mobjects = [*shapes.values(), *labels.values(), *trails.values()]
-            for line, vector_label, _overlay in vector_overlays.values():
-                dynamic_mobjects.append(line)
-                if vector_label is not None:
-                    dynamic_mobjects.append(vector_label)
             dynamic_mobjects.extend(line for line, _constraint in constraint_overlays.values())
             dynamic_mobjects.extend(highlight for highlight, _target_id in highlight_overlays.values())
+            dynamic_mobjects.extend(dynamic_overlay_groups)
             for graph in graph_overlays.values():
                 dynamic_mobjects.extend(graph["curves"])
+            # DecimalNumber replaces glyph submobjects as digit counts change.
+            # Keeping measurement groups last prevents Cairo's animated-family
+            # alignment from disturbing unrelated overlays later in the group.
+            dynamic_mobjects.extend(dynamic_measurement_groups)
             self.remove(*dynamic_mobjects)
             driver = VGroup(*dynamic_mobjects)
             self.add(driver)
+            update_scene(0)
             self.play(
                 UpdateFromAlphaFunc(driver, lambda _driver, alpha: update_scene(alpha * timeline.duration)),
                 run_time=timeline.duration,
@@ -363,6 +626,42 @@ def _render_manim(timeline: Timeline, width: int, height: int, fps: int, cancell
 def _is_dark(color: str) -> bool:
     red, green, blue = (int(color[index : index + 2], 16) for index in (1, 3, 5))
     return (0.2126 * red + 0.7152 * green + 0.0722 * blue) < 128
+
+
+def _overlay_opacity(data: dict[str, Any], timestamp: float, duration: float) -> float:
+    start = max(0.0, float(data.get("startTime", 0.0)))
+    fade = max(0.0, float(data.get("fadeDuration", 0.0)))
+    if timestamp < start:
+        return 0.0
+    if fade and timestamp < start + fade:
+        return min(1.0, (timestamp - start) / fade)
+    if "endTime" not in data:
+        return 1.0
+    end = min(duration, float(data["endTime"]))
+    if timestamp > end:
+        return 0.0
+    if fade and timestamp > end - fade:
+        return min(1.0, (end - timestamp) / fade)
+    return 1.0
+
+
+def _place_measurement_label(
+    label: Any,
+    arrow: Any,
+    start: tuple[float, float, float],
+    end: tuple[float, float, float],
+    offset_x: float,
+    offset_y: float,
+    up: Any,
+    down: Any,
+    left: Any,
+    right: Any,
+) -> None:
+    if abs(end[0] - start[0]) >= abs(end[1] - start[1]):
+        direction = down if offset_y < 0 else up
+    else:
+        direction = left if offset_x < 0 else right
+    label.next_to(arrow, direction=direction, buff=0.045)
 
 
 def _overlay_vector(source: Any, state: dict[str, float], timeline: Timeline, target_id: str) -> tuple[float, float]:

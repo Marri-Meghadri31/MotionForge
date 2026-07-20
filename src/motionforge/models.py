@@ -37,7 +37,19 @@ from motionforge.constants import (
 Color = str
 Point = tuple[float, float]
 ShapeKind = Literal["circle", "box", "polygon", "segment"]
-OverlayKind = Literal["vector", "path", "equation", "graph", "eventMarker", "highlight"]
+OverlayKind = Literal[
+    "vector",
+    "path",
+    "line",
+    "measurement",
+    "equation",
+    "graph",
+    "eventMarker",
+    "highlight",
+]
+AnchorKind = Literal["center", "top", "bottom", "left", "right", "pointA", "pointB", "start", "end"]
+GeometryOperation = Literal["connect", "extendToY", "deltaX", "deltaY", "distance"]
+RenderStyle = Literal["shape", "person", "lamp", "light", "ground"]
 
 
 def _camel(name: str) -> str:
@@ -245,6 +257,7 @@ class ObjectStyle(ContractModel):
     show_label: bool = False
     opacity: float = Field(default=0.9, ge=0, le=1)
     stroke_width: float = Field(default=2.0, ge=0, le=20)
+    render_as: RenderStyle = "shape"
 
     _color = field_validator("color")(validate_color)
 
@@ -266,6 +279,37 @@ class TrailSpec(ContractModel):
     fade: bool = True
 
 
+class PointReference(ContractModel):
+    """A world-space point sourced from a physics object, prior overlay, or literal.
+
+    Offsets are expressed in scene units after object rotation. Overlay references
+    allow declarative geometry to form dependency chains such as
+    object top -> projected ray -> measured shadow length.
+    """
+
+    object_id: str | None = None
+    overlay_id: str | None = None
+    point: Point | None = None
+    anchor: AnchorKind = "center"
+    offset: Point = (0.0, 0.0)
+
+    @field_validator("point", "offset")
+    @classmethod
+    def validate_point(cls, value: Point | None, info: Any) -> Point | None:
+        return None if value is None else _point_within_limit(value, info.field_name)
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "PointReference":
+        sources = sum(value is not None for value in (self.object_id, self.overlay_id, self.point))
+        if sources != 1:
+            raise ValueError("point reference requires exactly one of objectId, overlayId, or point")
+        if self.overlay_id is not None and self.anchor not in {"start", "end"}:
+            raise ValueError("overlay point references must use the start or end anchor")
+        if self.point is not None and self.anchor != "center":
+            raise ValueError("literal point references use the center anchor")
+        return self
+
+
 class OverlaySpec(ContractModel):
     id: str
     kind: OverlayKind
@@ -273,9 +317,19 @@ class OverlaySpec(ContractModel):
     label: str | None = Field(default=None, max_length=MAX_LABEL_LENGTH)
     color: Color = "#378ADD"
     visible: bool = True
+    start: PointReference | None = None
+    end: PointReference | None = None
+    operation: GeometryOperation | None = None
     data: dict[str, Any] = Field(default_factory=dict)
 
     _color = field_validator("color")(validate_color)
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        if not IDENTIFIER.fullmatch(value):
+            raise ValueError("id must be 1-64 safe identifier characters")
+        return value
 
 
 class ParameterSpec(ContractModel):
@@ -300,7 +354,7 @@ class ParameterSpec(ContractModel):
 
 class VisualSpec(ContractModel):
     scene_size: tuple[int, int] = (800, 500)
-    units: Literal["pixels", "metres"] = "pixels"
+    units: Literal["pixels", "centimetres", "metres"] = "pixels"
     coordinate_system: Literal["cartesian-y-up"] = "cartesian-y-up"
     object_styles: dict[str, ObjectStyle] = Field(default_factory=dict)
     background_color: Color = "#FFFFFF"
@@ -343,9 +397,29 @@ class SceneSpec(ContractModel):
         missing_styles = set(self.visual.object_styles) - ids
         if missing_styles:
             raise ValueError(f"styles reference unknown objects: {', '.join(sorted(missing_styles))}")
+        overlay_ids = [overlay.id for overlay in self.visual.overlays]
+        if len(overlay_ids) != len(set(overlay_ids)):
+            raise ValueError("overlay ids must be unique")
+        known_overlays: set[str] = set()
         for overlay in self.visual.overlays:
             if overlay.target_id is not None and overlay.target_id not in ids:
                 raise ValueError(f"overlay '{overlay.id}' references unknown object '{overlay.target_id}'")
+            for reference in (overlay.start, overlay.end):
+                if reference is None:
+                    continue
+                if reference.object_id is not None and reference.object_id not in ids:
+                    raise ValueError(f"overlay '{overlay.id}' references unknown object '{reference.object_id}'")
+                if reference.overlay_id is not None and reference.overlay_id not in known_overlays:
+                    raise ValueError(
+                        f"overlay '{overlay.id}' must reference an earlier overlay, not '{reference.overlay_id}'"
+                    )
+            if overlay.kind in {"line", "measurement"} and (overlay.start is None or overlay.end is None):
+                raise ValueError(f"{overlay.kind} overlay '{overlay.id}' requires start and end references")
+            if overlay.kind == "line" and overlay.operation not in {None, "connect", "extendToY"}:
+                raise ValueError(f"line overlay '{overlay.id}' uses an incompatible geometry operation")
+            if overlay.kind == "measurement" and overlay.operation not in {"deltaX", "deltaY", "distance"}:
+                raise ValueError(f"measurement overlay '{overlay.id}' requires deltaX, deltaY, or distance")
+            known_overlays.add(overlay.id)
         parameter_ids = [parameter.id for parameter in self.parameters]
         if len(parameter_ids) != len(set(parameter_ids)):
             raise ValueError("parameter ids must be unique")
@@ -430,6 +504,7 @@ class TimelineObject(ContractModel):
     show_label: bool = False
     opacity: float = 0.9
     stroke_width: float = 2.0
+    render_as: RenderStyle = "shape"
 
 
 class TimelineScene(ContractModel):
@@ -502,6 +577,29 @@ class OverlayTrack(ContractModel):
     overlay: OverlaySpec
     times: list[float] = Field(default_factory=list)
     visible: list[bool] = Field(default_factory=list)
+    start_x: list[float] = Field(default_factory=list)
+    start_y: list[float] = Field(default_factory=list)
+    end_x: list[float] = Field(default_factory=list)
+    end_y: list[float] = Field(default_factory=list)
+    value: list[float] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_lengths(self) -> "OverlayTrack":
+        length = len(self.times)
+        if length == 0:
+            if any((self.visible, self.start_x, self.start_y, self.end_x, self.end_y, self.value)):
+                raise ValueError("overlay sample arrays require times")
+            return self
+        if any(b <= a for a, b in zip(self.times, self.times[1:])):
+            raise ValueError("overlay track times must be strictly increasing")
+        required = (self.start_x, self.start_y, self.end_x, self.end_y)
+        if any(len(values) != length for values in required):
+            raise ValueError("overlay geometry arrays must match times")
+        if self.visible and len(self.visible) != length:
+            raise ValueError("overlay visibility must be empty or match times")
+        if self.value and len(self.value) != length:
+            raise ValueError("overlay values must be empty or match times")
+        return self
 
 
 class Timeline(ContractModel):
