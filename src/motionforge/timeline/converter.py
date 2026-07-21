@@ -11,6 +11,7 @@ from motionforge.models import (
     ObjectTrack,
     OverlaySpec,
     OverlayTrack,
+    PointReference,
     SceneSpec,
     SimulationOptions,
     Timeline,
@@ -49,6 +50,7 @@ def build_timeline(scene: SceneSpec, result: SimulationResult, options: Simulati
             show_label=style.show_label,
             opacity=style.opacity,
             stroke_width=style.stroke_width,
+            render_as=style.render_as,
         )
         selected_frames = result.frames[:1] if definition.is_static else result.frames
         states = [frame["objects"][definition.id] for frame in selected_frames]
@@ -70,10 +72,12 @@ def build_timeline(scene: SceneSpec, result: SimulationResult, options: Simulati
             momentum_x=[state["momentum_x"] for state in states] if inspect else [],
             momentum_y=[state["momentum_y"] for state in states] if inspect else [],
         )
-    overlay_tracks = {
-        overlay.id: OverlayTrack(overlay=overlay)
-        for overlay in scene.visual.overlays
-    }
+    overlay_tracks: dict[str, OverlayTrack] = {}
+    for overlay in scene.visual.overlays:
+        if overlay.kind in {"line", "measurement"}:
+            overlay_tracks[overlay.id] = _build_geometry_track(scene, result, overlay, overlay_tracks)
+        else:
+            overlay_tracks[overlay.id] = OverlayTrack(overlay=overlay)
     return Timeline(
         duration=scene.physics.duration,
         simulation_fps=1 / scene.physics.dt,
@@ -87,6 +91,7 @@ def build_timeline(scene: SceneSpec, result: SimulationResult, options: Simulati
             gravity=scene.physics.gravity,
             objects=static_scene_objects,
             constraints=scene.physics.constraints,
+            force_fields=scene.physics.force_fields,
             camera=scene.visual.camera,
             trail=scene.visual.trail,
         ),
@@ -142,6 +147,148 @@ def sample_track(track: ObjectTrack, timestamp: float) -> dict[str, float]:
 def sample_timeline(timeline: Timeline, timestamp: float) -> dict[str, dict[str, float]]:
     bounded = min(timeline.duration, max(0.0, timestamp))
     return {obj_id: sample_track(track, bounded) for obj_id, track in timeline.tracks.items()}
+
+
+def sample_overlay_track(track: OverlayTrack, timestamp: float) -> dict[str, float | bool]:
+    """Interpolate renderer-neutral geometry derived from simulation samples."""
+
+    if not track.times:
+        return {}
+    if len(track.times) == 1 or timestamp <= track.times[0]:
+        left = right = 0
+        fraction = 0.0
+    elif timestamp >= track.times[-1]:
+        left = right = len(track.times) - 1
+        fraction = 0.0
+    else:
+        right = bisect.bisect_right(track.times, timestamp)
+        left = right - 1
+        fraction = (timestamp - track.times[left]) / (track.times[right] - track.times[left])
+    result: dict[str, float | bool] = {
+        name: _interpolate(getattr(track, name), left, right, fraction)
+        for name in ("start_x", "start_y", "end_x", "end_y")
+    }
+    if track.value:
+        result["value"] = _interpolate(track.value, left, right, fraction)
+    if track.visible:
+        result["visible"] = track.visible[left]
+    return result
+
+
+def _build_geometry_track(
+    scene: SceneSpec,
+    result: SimulationResult,
+    overlay: OverlaySpec,
+    prior_tracks: dict[str, OverlayTrack],
+) -> OverlayTrack:
+    if overlay.start is None or overlay.end is None:  # protected by SceneSpec validation
+        return OverlayTrack(overlay=overlay)
+    times: list[float] = []
+    start_x: list[float] = []
+    start_y: list[float] = []
+    end_x: list[float] = []
+    end_y: list[float] = []
+    values: list[float] = []
+    for frame in result.frames:
+        timestamp = frame["t"]
+        start = _resolve_point(scene, overlay.start, frame["objects"], prior_tracks, timestamp)
+        end = _resolve_point(scene, overlay.end, frame["objects"], prior_tracks, timestamp)
+        if overlay.operation == "extendToY":
+            target_y = float(overlay.data.get("targetY", 0.0))
+            delta_y = end[1] - start[1]
+            if abs(delta_y) < 1e-12:
+                raise ValueError(f"overlay '{overlay.id}' cannot extend a horizontal line to y={target_y:g}")
+            factor = (target_y - start[1]) / delta_y
+            end = (start[0] + factor * (end[0] - start[0]), target_y)
+        if overlay.kind == "measurement":
+            if overlay.operation == "deltaX":
+                value = end[0] - start[0]
+            elif overlay.operation == "deltaY":
+                value = end[1] - start[1]
+            else:
+                value = math.dist(start, end)
+            values.append(abs(value) if overlay.data.get("absolute", True) else value)
+        times.append(timestamp)
+        start_x.append(start[0])
+        start_y.append(start[1])
+        end_x.append(end[0])
+        end_y.append(end[1])
+    return OverlayTrack(
+        overlay=overlay,
+        times=times,
+        start_x=start_x,
+        start_y=start_y,
+        end_x=end_x,
+        end_y=end_y,
+        value=values,
+    )
+
+
+def _resolve_point(
+    scene: SceneSpec,
+    reference: PointReference,
+    states: dict[str, dict[str, float]],
+    overlay_tracks: dict[str, OverlayTrack],
+    timestamp: float,
+) -> tuple[float, float]:
+    if reference.point is not None:
+        point = reference.point
+    elif reference.object_id is not None:
+        definition = next(obj for obj in scene.physics.objects if obj.id == reference.object_id)
+        state = states[reference.object_id]
+        local = _local_anchor(definition, reference.anchor)
+        cosine, sine = math.cos(state["angle"]), math.sin(state["angle"])
+        point = (
+            state["x"] + local[0] * cosine - local[1] * sine,
+            state["y"] + local[0] * sine + local[1] * cosine,
+        )
+    else:
+        sampled = sample_overlay_track(overlay_tracks[reference.overlay_id or ""], timestamp)
+        prefix = "start" if reference.anchor == "start" else "end"
+        point = (float(sampled[f"{prefix}_x"]), float(sampled[f"{prefix}_y"]))
+    return point[0] + reference.offset[0], point[1] + reference.offset[1]
+
+
+def _local_anchor(definition: Any, anchor: str) -> tuple[float, float]:
+    if definition.shape == "segment":
+        point_a = definition.point_a or (0.0, 0.0)
+        point_b = definition.point_b or (0.0, 0.0)
+        if anchor == "center":
+            return (point_a[0] + point_b[0]) / 2, (point_a[1] + point_b[1]) / 2
+        if anchor == "pointA":
+            return point_a
+        if anchor == "pointB":
+            return point_b
+        left, right = sorted((point_a, point_b), key=lambda item: item[0])
+        bottom, top = sorted((point_a, point_b), key=lambda item: item[1])
+        return {"left": left, "right": right, "bottom": bottom, "top": top}.get(anchor, (0.0, 0.0))
+    if anchor == "center":
+        return 0.0, 0.0
+    if definition.shape == "circle":
+        half_width = half_height = definition.radius or 0.0
+    elif definition.shape == "box":
+        half_width = (definition.width or 0.0) / 2
+        half_height = (definition.height or 0.0) / 2
+    else:
+        vertices = definition.vertices or [(0.0, 0.0)]
+        xs = [point[0] for point in vertices]
+        ys = [point[1] for point in vertices]
+        minimum_x, maximum_x = min(xs), max(xs)
+        minimum_y, maximum_y = min(ys), max(ys)
+        middle_x = (minimum_x + maximum_x) / 2
+        middle_y = (minimum_y + maximum_y) / 2
+        return {
+            "top": (middle_x, maximum_y),
+            "bottom": (middle_x, minimum_y),
+            "left": (minimum_x, middle_y),
+            "right": (maximum_x, middle_y),
+        }.get(anchor, (0.0, 0.0))
+    return {
+        "top": (0.0, half_height),
+        "bottom": (0.0, -half_height),
+        "left": (-half_width, 0.0),
+        "right": (half_width, 0.0),
+    }.get(anchor, (0.0, 0.0))
 
 
 def from_legacy_keyframes(keyframes: list[dict[str, Any]]) -> Timeline:

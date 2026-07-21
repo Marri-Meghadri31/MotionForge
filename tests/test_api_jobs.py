@@ -74,7 +74,11 @@ class SidecarIntegrationTests(unittest.TestCase):
         self.assertLess(time.perf_counter() - started, 0.2)
 
     def test_compile_then_simulate_via_job_references(self) -> None:
-        status, compile_job = self.request("POST", "/v1/scenes/compile", {"contractVersion": 1, "prompt": "projectile motion"})
+        status, compile_job = self.request(
+            "POST",
+            "/v1/scenes/compile",
+            {"contractVersion": 1, "prompt": "projectile motion", "preferTemplate": True},
+        )
         self.assertEqual(status, 202)
         compiled = self.wait_for_job(compile_job["jobId"])
         self.assertEqual(compiled["status"], "completed", compiled.get("error"))
@@ -101,7 +105,9 @@ class SidecarIntegrationTests(unittest.TestCase):
         self.assertEqual(body["error"]["code"], "CONTRACT_MISMATCH")
 
     def test_completed_job_events_are_available_as_sse(self) -> None:
-        status, started = self.request("POST", "/v1/scenes/compile", {"prompt": "falling ball"})
+        status, started = self.request(
+            "POST", "/v1/scenes/compile", {"prompt": "falling ball", "preferTemplate": True}
+        )
         self.assertEqual(status, 202)
         completed = self.wait_for_job(started["jobId"])
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
@@ -121,7 +127,7 @@ class SidecarIntegrationTests(unittest.TestCase):
         status, created = self.request(
             "POST",
             "/v1/visualizations",
-            {"contractVersion": 1, "prompt": "projectile motion"},
+            {"contractVersion": 1, "prompt": "projectile motion", "preferTemplate": True},
         )
         self.assertEqual(status, 202)
         visualization_id = created["visualizationId"]
@@ -167,7 +173,9 @@ class SidecarIntegrationTests(unittest.TestCase):
         self.assertTrue(all(value == 0 for value in payload["timeline"]["tracks"]["marker"]["ax"]))
 
     def test_visualization_export_and_sse_routes(self) -> None:
-        status, created = self.request("POST", "/v1/visualizations", {"prompt": "falling ball"})
+        status, created = self.request(
+            "POST", "/v1/visualizations", {"prompt": "falling ball", "preferTemplate": True}
+        )
         self.assertEqual(status, 202)
         visualization_id = created["visualizationId"]
         completed = self.wait_for_visualization(visualization_id)
@@ -233,7 +241,9 @@ class SidecarIntegrationTests(unittest.TestCase):
         self.assertEqual(finished["status"], "cancelled")
 
     def test_visualization_cancel_stops_linked_export(self) -> None:
-        status, created = self.request("POST", "/v1/visualizations", {"prompt": "falling ball"})
+        status, created = self.request(
+            "POST", "/v1/visualizations", {"prompt": "falling ball", "preferTemplate": True}
+        )
         self.assertEqual(status, 202)
         visualization_id = created["visualizationId"]
         completed = self.wait_for_visualization(visualization_id)

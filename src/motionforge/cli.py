@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -11,9 +12,11 @@ from typing import Any
 from pydantic import ValidationError
 
 from motionforge.api import serve
+from motionforge.cache import JsonCache, cache_key
 from motionforge.core import compile_scene, export_video, simulate_scene
 from motionforge.errors import ErrorCode, MotionForgeError, validation_diagnostics
 from motionforge.models import CompileRequest, ExportOptions, SceneSpec, SimulationOptions, Timeline
+from motionforge.paths import app_paths
 
 COMMANDS = {"serve", "compile", "simulate", "export", "run", "_export-worker"}
 
@@ -49,7 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
     _provider_arguments(compile_parser)
     compile_parser.add_argument("--template")
     compile_parser.add_argument("--parameters", help="JSON object of deterministic template parameters")
-    compile_parser.add_argument("--no-template", action="store_true")
+    compile_parser.add_argument("--prefer-template", action="store_true", help="Use a matching deterministic fast path when available")
+    compile_parser.add_argument("--no-template", action="store_true", help=argparse.SUPPRESS)
     compile_parser.add_argument("--output", "-o")
 
     simulate_parser = subparsers.add_parser("simulate", help="Simulate a SceneSpec into a compact Timeline")
@@ -71,7 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
     _provider_arguments(run_parser)
     run_parser.add_argument("--template")
     run_parser.add_argument("--parameters")
-    run_parser.add_argument("--no-template", action="store_true")
+    run_parser.add_argument("--prefer-template", action="store_true", help="Use a matching deterministic fast path when available")
+    run_parser.add_argument("--no-template", action="store_true", help=argparse.SUPPRESS)
     run_parser.add_argument("--output", "-o", default="output")
     run_parser.add_argument("--timeline-output")
     run_parser.add_argument("--no-export", action="store_true")
@@ -142,26 +147,91 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _compile_from_args(args: argparse.Namespace) -> SceneSpec:
+    return compile_scene(_compile_request_from_args(args))
+
+
+def _compile_request_from_args(args: argparse.Namespace) -> CompileRequest:
     parameters = json.loads(args.parameters) if args.parameters else {}
-    request = CompileRequest(
+    return CompileRequest(
         prompt=args.prompt,
         parameters=parameters,
         template=args.template,
         provider=args.provider,
         model=args.model,
-        prefer_template=not args.no_template,
+        prefer_template=args.prefer_template and not args.no_template,
         timeout_seconds=args.timeout,
     )
-    return compile_scene(request)
+
+
+def _legacy_cache() -> JsonCache | None:
+    """Return a best-effort cache; rendering must work on read-only installs."""
+
+    try:
+        return JsonCache(app_paths().cache)
+    except OSError:
+        return None
+
+
+def _cache_get(cache: JsonCache | None, namespace: str, key: str) -> dict[str, Any] | None:
+    try:
+        return cache.get(namespace, key) if cache is not None else None
+    except OSError:
+        return None
+
+
+def _cache_put(cache: JsonCache | None, namespace: str, key: str, value: SceneSpec | Timeline) -> None:
+    try:
+        if cache is not None:
+            cache.put(namespace, key, value)
+    except OSError:
+        pass
 
 
 def _run(args: argparse.Namespace) -> int:
+    total_started = time.perf_counter()
+    request = _compile_request_from_args(args)
+    cache = _legacy_cache()
     print("[1/4] Compiling and validating the scene...", flush=True)
-    scene = _compile_from_args(args)
-    print(f"      -> {len(scene.physics.objects)} objects, {scene.physics.duration:g}s duration ({scene.metadata.origin})", flush=True)
+    compile_started = time.perf_counter()
+    scene_key = cache_key(
+        "scene",
+        request.contract_dump(exclude={"timeout_seconds", "privacy"}),
+        extra_versions={"provider": request.provider, "model": request.model},
+    )
+    cached_scene = _cache_get(cache, "scenes", scene_key)
+    if cached_scene:
+        scene = SceneSpec.model_validate(cached_scene)
+        scene_cache_hit = True
+    else:
+        scene = compile_scene(request)
+        _cache_put(cache, "scenes", scene_key, scene)
+        scene_cache_hit = False
+    compile_seconds = time.perf_counter() - compile_started
+    cache_label = ", cache hit" if scene_cache_hit else ""
+    print(
+        f"      -> {len(scene.physics.objects)} objects, {scene.physics.duration:g}s duration "
+        f"({scene.metadata.origin}{cache_label}, {compile_seconds:.3f}s)",
+        flush=True,
+    )
     print("[2/4] Simulating the physics...", flush=True)
-    timeline = simulate_scene(scene)
-    print(f"      -> {max(len(track.times) for track in timeline.tracks.values())} simulation samples", flush=True)
+    simulation_started = time.perf_counter()
+    simulation_options = SimulationOptions()
+    timeline_key = cache_key("timeline", {"scene": scene, "options": simulation_options})
+    cached_timeline = _cache_get(cache, "timelines", timeline_key)
+    if cached_timeline:
+        timeline = Timeline.model_validate(cached_timeline)
+        timeline_cache_hit = True
+    else:
+        timeline = simulate_scene(scene, simulation_options)
+        _cache_put(cache, "timelines", timeline_key, timeline)
+        timeline_cache_hit = False
+    simulation_seconds = time.perf_counter() - simulation_started
+    cache_label = ", cache hit" if timeline_cache_hit else ""
+    print(
+        f"      -> {max(len(track.times) for track in timeline.tracks.values())} simulation samples"
+        f" ({simulation_seconds:.3f}s{cache_label})",
+        flush=True,
+    )
     print("[3/4] Building the compact timeline...", flush=True)
     if args.timeline_output:
         _write_json(timeline, args.timeline_output)
@@ -175,7 +245,11 @@ def _run(args: argparse.Namespace) -> int:
     if output.suffix.lower() != ".mp4":
         output = output.with_suffix(".mp4")
     result = export_video(timeline, ExportOptions(preset=preset), output_path=output)
-    print(f"Done: {result.output_path}", flush=True)
+    print(
+        f"Done: {result.output_path} "
+        f"(render {result.render_seconds:.3f}s, total {time.perf_counter() - total_started:.3f}s)",
+        flush=True,
+    )
     return 0
 
 

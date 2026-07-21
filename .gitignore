@@ -1,5 +1,6 @@
 # Virtual environment
 .venv/
+.uv-cache/
 build/
 dist/
 *.egg-info/

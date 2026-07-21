@@ -37,7 +37,19 @@ from motionforge.constants import (
 Color = str
 Point = tuple[float, float]
 ShapeKind = Literal["circle", "box", "polygon", "segment"]
-OverlayKind = Literal["vector", "path", "equation", "graph", "eventMarker", "highlight"]
+OverlayKind = Literal[
+    "vector",
+    "path",
+    "line",
+    "measurement",
+    "equation",
+    "graph",
+    "eventMarker",
+    "highlight",
+]
+AnchorKind = Literal["center", "top", "bottom", "left", "right", "pointA", "pointB", "start", "end"]
+GeometryOperation = Literal["connect", "extendToY", "deltaX", "deltaY", "distance"]
+RenderStyle = Literal["shape", "ball", "person", "lamp", "light", "ground"]
 
 
 def _camel(name: str) -> str:
@@ -174,6 +186,27 @@ class ConstantForce(ContractModel):
         return value
 
 
+class ForceFieldSpec(ContractModel):
+    """A declarative position-dependent interaction evaluated every physics step."""
+
+    id: str
+    type: Literal["inverseSquare"]
+    sources: list[str] = Field(min_length=1, max_length=MAX_OBJECTS)
+    targets: list[str] = Field(min_length=1, max_length=MAX_OBJECTS)
+    strength: float = Field(gt=0, le=MAX_FORCE_MAGNITUDE)
+    direction: Literal["attract", "repel"] = "attract"
+    softening: float = Field(default=1.0, ge=0, le=MAX_COORDINATE)
+    max_force: float = Field(default=MAX_FORCE_MAGNITUDE, gt=0, le=MAX_FORCE_MAGNITUDE)
+    mutual: bool = False
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        if not IDENTIFIER.fullmatch(value):
+            raise ValueError("id must be 1-64 safe identifier characters")
+        return value
+
+
 class ConstraintSpec(ContractModel):
     id: str
     type: Literal["pin", "dampedSpring"]
@@ -201,6 +234,7 @@ class PhysicsSpec(ContractModel):
     dt: float = Field(default=1 / 60, ge=MIN_TIMESTEP_SECONDS, le=MAX_TIMESTEP_SECONDS)
     objects: list[PhysicsObject] = Field(min_length=1, max_length=MAX_OBJECTS)
     forces: list[ConstantForce] = Field(default_factory=list, max_length=MAX_FORCES)
+    force_fields: list[ForceFieldSpec] = Field(default_factory=list, max_length=MAX_FORCES)
     constraints: list[ConstraintSpec] = Field(default_factory=list, max_length=MAX_FORCES)
 
     @field_validator("gravity")
@@ -224,6 +258,20 @@ class PhysicsSpec(ContractModel):
             static_targets = set(force.applies_to) - dynamic
             if static_targets:
                 raise ValueError(f"forces cannot target static objects: {', '.join(sorted(static_targets))}")
+        field_ids = [field.id for field in self.force_fields]
+        if len(field_ids) != len(set(field_ids)):
+            raise ValueError("force-field ids must be unique")
+        for field in self.force_fields:
+            missing = (set(field.sources) | set(field.targets)) - known
+            if missing:
+                raise ValueError(f"force field references unknown objects: {', '.join(sorted(missing))}")
+            static_targets = set(field.targets) - dynamic
+            if static_targets and not field.mutual:
+                raise ValueError(
+                    f"directed force fields cannot target static objects: {', '.join(sorted(static_targets))}"
+                )
+            if not any(source != target for source in field.sources for target in field.targets):
+                raise ValueError("force field requires at least two different objects")
         constraint_ids = [constraint.id for constraint in self.constraints]
         if len(constraint_ids) != len(set(constraint_ids)):
             raise ValueError("constraint ids must be unique")
@@ -245,6 +293,7 @@ class ObjectStyle(ContractModel):
     show_label: bool = False
     opacity: float = Field(default=0.9, ge=0, le=1)
     stroke_width: float = Field(default=2.0, ge=0, le=20)
+    render_as: RenderStyle = "shape"
 
     _color = field_validator("color")(validate_color)
 
@@ -266,6 +315,37 @@ class TrailSpec(ContractModel):
     fade: bool = True
 
 
+class PointReference(ContractModel):
+    """A world-space point sourced from a physics object, prior overlay, or literal.
+
+    Offsets are expressed in scene units after object rotation. Overlay references
+    allow declarative geometry to form dependency chains such as
+    object top -> projected ray -> measured shadow length.
+    """
+
+    object_id: str | None = None
+    overlay_id: str | None = None
+    point: Point | None = None
+    anchor: AnchorKind = "center"
+    offset: Point = (0.0, 0.0)
+
+    @field_validator("point", "offset")
+    @classmethod
+    def validate_point(cls, value: Point | None, info: Any) -> Point | None:
+        return None if value is None else _point_within_limit(value, info.field_name)
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "PointReference":
+        sources = sum(value is not None for value in (self.object_id, self.overlay_id, self.point))
+        if sources != 1:
+            raise ValueError("point reference requires exactly one of objectId, overlayId, or point")
+        if self.overlay_id is not None and self.anchor not in {"start", "end"}:
+            raise ValueError("overlay point references must use the start or end anchor")
+        if self.point is not None and self.anchor != "center":
+            raise ValueError("literal point references use the center anchor")
+        return self
+
+
 class OverlaySpec(ContractModel):
     id: str
     kind: OverlayKind
@@ -273,9 +353,19 @@ class OverlaySpec(ContractModel):
     label: str | None = Field(default=None, max_length=MAX_LABEL_LENGTH)
     color: Color = "#378ADD"
     visible: bool = True
+    start: PointReference | None = None
+    end: PointReference | None = None
+    operation: GeometryOperation | None = None
     data: dict[str, Any] = Field(default_factory=dict)
 
     _color = field_validator("color")(validate_color)
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        if not IDENTIFIER.fullmatch(value):
+            raise ValueError("id must be 1-64 safe identifier characters")
+        return value
 
 
 class ParameterSpec(ContractModel):
@@ -300,7 +390,7 @@ class ParameterSpec(ContractModel):
 
 class VisualSpec(ContractModel):
     scene_size: tuple[int, int] = (800, 500)
-    units: Literal["pixels", "metres"] = "pixels"
+    units: Literal["pixels", "centimetres", "metres"] = "pixels"
     coordinate_system: Literal["cartesian-y-up"] = "cartesian-y-up"
     object_styles: dict[str, ObjectStyle] = Field(default_factory=dict)
     background_color: Color = "#FFFFFF"
@@ -343,9 +433,29 @@ class SceneSpec(ContractModel):
         missing_styles = set(self.visual.object_styles) - ids
         if missing_styles:
             raise ValueError(f"styles reference unknown objects: {', '.join(sorted(missing_styles))}")
+        overlay_ids = [overlay.id for overlay in self.visual.overlays]
+        if len(overlay_ids) != len(set(overlay_ids)):
+            raise ValueError("overlay ids must be unique")
+        known_overlays: set[str] = set()
         for overlay in self.visual.overlays:
             if overlay.target_id is not None and overlay.target_id not in ids:
                 raise ValueError(f"overlay '{overlay.id}' references unknown object '{overlay.target_id}'")
+            for reference in (overlay.start, overlay.end):
+                if reference is None:
+                    continue
+                if reference.object_id is not None and reference.object_id not in ids:
+                    raise ValueError(f"overlay '{overlay.id}' references unknown object '{reference.object_id}'")
+                if reference.overlay_id is not None and reference.overlay_id not in known_overlays:
+                    raise ValueError(
+                        f"overlay '{overlay.id}' must reference an earlier overlay, not '{reference.overlay_id}'"
+                    )
+            if overlay.kind in {"line", "measurement"} and (overlay.start is None or overlay.end is None):
+                raise ValueError(f"{overlay.kind} overlay '{overlay.id}' requires start and end references")
+            if overlay.kind == "line" and overlay.operation not in {None, "connect", "extendToY"}:
+                raise ValueError(f"line overlay '{overlay.id}' uses an incompatible geometry operation")
+            if overlay.kind == "measurement" and overlay.operation not in {"deltaX", "deltaY", "distance"}:
+                raise ValueError(f"measurement overlay '{overlay.id}' requires deltaX, deltaY, or distance")
+            known_overlays.add(overlay.id)
         parameter_ids = [parameter.id for parameter in self.parameters]
         if len(parameter_ids) != len(set(parameter_ids)):
             raise ValueError("parameter ids must be unique")
@@ -360,7 +470,7 @@ class CompileRequest(ContractModel):
     template: str | None = None
     provider: Literal["ollama", "anthropic"] = "ollama"
     model: str | None = Field(default=None, max_length=200)
-    prefer_template: bool = True
+    prefer_template: bool = False
     timeout_seconds: float = Field(default=90.0, gt=0, le=300)
     privacy: Literal["standard", "redact"] = "standard"
 
@@ -430,6 +540,7 @@ class TimelineObject(ContractModel):
     show_label: bool = False
     opacity: float = 0.9
     stroke_width: float = 2.0
+    render_as: RenderStyle = "shape"
 
 
 class TimelineScene(ContractModel):
@@ -441,6 +552,7 @@ class TimelineScene(ContractModel):
     gravity: Point = (0.0, -981.0)
     objects: dict[str, TimelineObject]
     constraints: list[ConstraintSpec] = Field(default_factory=list)
+    force_fields: list[ForceFieldSpec] = Field(default_factory=list)
     camera: CameraSpec = Field(default_factory=CameraSpec)
     trail: TrailSpec = Field(default_factory=TrailSpec)
 
@@ -502,6 +614,29 @@ class OverlayTrack(ContractModel):
     overlay: OverlaySpec
     times: list[float] = Field(default_factory=list)
     visible: list[bool] = Field(default_factory=list)
+    start_x: list[float] = Field(default_factory=list)
+    start_y: list[float] = Field(default_factory=list)
+    end_x: list[float] = Field(default_factory=list)
+    end_y: list[float] = Field(default_factory=list)
+    value: list[float] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_lengths(self) -> "OverlayTrack":
+        length = len(self.times)
+        if length == 0:
+            if any((self.visible, self.start_x, self.start_y, self.end_x, self.end_y, self.value)):
+                raise ValueError("overlay sample arrays require times")
+            return self
+        if any(b <= a for a, b in zip(self.times, self.times[1:])):
+            raise ValueError("overlay track times must be strictly increasing")
+        required = (self.start_x, self.start_y, self.end_x, self.end_y)
+        if any(len(values) != length for values in required):
+            raise ValueError("overlay geometry arrays must match times")
+        if self.visible and len(self.visible) != length:
+            raise ValueError("overlay visibility must be empty or match times")
+        if self.value and len(self.value) != length:
+            raise ValueError("overlay values must be empty or match times")
+        return self
 
 
 class Timeline(ContractModel):
