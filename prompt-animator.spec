@@ -1,5 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+import shutil
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_all
 
 
@@ -7,10 +11,15 @@ manim_data, manim_binaries, manim_imports = collect_all('manim')
 manimpango_data, manimpango_binaries, manimpango_imports = collect_all('manimpango')
 pymunk_data, pymunk_binaries, pymunk_imports = collect_all('pymunk')
 
+ffmpeg = os.environ.get('MOTIONFORGE_FFMPEG') or shutil.which('ffmpeg')
+if not ffmpeg or not Path(ffmpeg).is_file():
+    raise RuntimeError('FFmpeg is required for the distributable build.')
+ffmpeg_binaries = [(ffmpeg, 'resources/ffmpeg')]
+
 a = Analysis(
     ['src/motionforge/__main__.py'],
     pathex=['src'],
-    binaries=manim_binaries + manimpango_binaries + pymunk_binaries,
+    binaries=manim_binaries + manimpango_binaries + pymunk_binaries + ffmpeg_binaries,
     datas=manim_data + manimpango_data + pymunk_data,
     hiddenimports=manim_imports + manimpango_imports + pymunk_imports,
     hookspath=[],

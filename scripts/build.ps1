@@ -1,3 +1,7 @@
+param(
+    [string]$FfmpegPath = $env:MOTIONFORGE_FFMPEG
+)
+
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $DistributionRoot = Join-Path $ProjectRoot "dist"
@@ -9,6 +13,18 @@ Set-Location -LiteralPath $ProjectRoot
 if ([string]::IsNullOrWhiteSpace($env:UV_CACHE_DIR)) {
     $env:UV_CACHE_DIR = Join-Path $ProjectRoot ".uv-cache"
 }
+
+if ([string]::IsNullOrWhiteSpace($FfmpegPath)) {
+    $FfmpegCommand = Get-Command ffmpeg.exe -CommandType Application -ErrorAction SilentlyContinue
+    if ($FfmpegCommand) {
+        $FfmpegPath = $FfmpegCommand.Source
+    }
+}
+if ([string]::IsNullOrWhiteSpace($FfmpegPath) -or -not (Test-Path -LiteralPath $FfmpegPath -PathType Leaf)) {
+    throw "FFmpeg was not found. Install it or run '.\scripts\build.ps1 -FfmpegPath C:\path\to\ffmpeg.exe'."
+}
+$env:MOTIONFORGE_FFMPEG = (Resolve-Path -LiteralPath $FfmpegPath).Path
+Write-Host "Bundling FFmpeg: $env:MOTIONFORGE_FFMPEG"
 
 uv sync
 if ($LASTEXITCODE -ne 0) {
