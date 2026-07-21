@@ -4,7 +4,13 @@ MotionForge is a renderer-independent physics visualization engine for the Velo 
 
 All application code lives in `src/motionforge`. The root `main.py` is only a compatibility launcher for older Velo builds.
 
-**GPT-5.6 development note:** GPT-5.6 was used as a coding partner throughout MotionForge's development. It helped plan the renderer-independent architecture, implement and review the structured scene compiler, strengthen schema validation and deterministic repair, connect the physics-animation pipeline to Velo, and diagnose build, performance, and prompt-to-video playback issues. It was also used to create regression tests and verify representative scenes such as ramps, collisions, and orbital motion. MotionForge's runtime scene generation remains independently configurable through its supported model providers and currently defaults to Ollama; GPT-5.6 is not bundled with the application and is not required by end users.
+## Development with GPT-5.6 and Codex
+
+GPT-5.6 was used as an AI development assistant throughout MotionForge's development. It helped plan the renderer-independent architecture, explore the structured scene compiler and physics-animation pipeline, strengthen schema validation and deterministic repair, and reason through build, performance, and prompt-to-video playback issues.
+
+Codex was used alongside GPT-5.6 as a repository-aware coding agent. It inspected and modified the Python codebase, connected MotionForge to Velo, implemented and refined compiler, simulation, rendering, sidecar, and packaging behavior, updated documentation, ran regression tests, and verified representative scenes such as ramps, collisions, and orbital motion. AI-generated suggestions and code were reviewed and validated as part of the normal development workflow.
+
+GPT-5.6 and Codex were development aids, not runtime dependencies. MotionForge's runtime scene generation remains independently configurable through its supported model providers and currently defaults to Ollama; neither development tool is bundled with the application or required by end users.
 
 ## Quick start
 
