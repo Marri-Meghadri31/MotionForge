@@ -4,6 +4,8 @@ MotionForge is a renderer-independent physics visualization engine for the Velo 
 
 All application code lives in `src/motionforge`. The root `main.py` is only a compatibility launcher for older Velo builds.
 
+**GPT-5.6 development note:** GPT-5.6 was used as a coding partner throughout MotionForge's development. It helped plan the renderer-independent architecture, implement and review the structured scene compiler, strengthen schema validation and deterministic repair, connect the physics-animation pipeline to Velo, and diagnose build, performance, and prompt-to-video playback issues. It was also used to create regression tests and verify representative scenes such as ramps, collisions, and orbital motion. MotionForge's runtime scene generation remains independently configurable through its supported model providers and currently defaults to Ollama; GPT-5.6 is not bundled with the application and is not required by end users.
+
 ## Quick start
 
 ```powershell
