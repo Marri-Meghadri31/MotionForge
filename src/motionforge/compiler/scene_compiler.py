@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import re
 from threading import Event
 from typing import Any
@@ -12,6 +13,7 @@ from pydantic import ValidationError
 
 from motionforge.compiler.templates import classify_template, compile_template
 from motionforge.constants import (
+    MAX_COORDINATE,
     MAX_DURATION_SECONDS,
     MAX_FORCE_MAGNITUDE,
     MAX_MASS,
@@ -91,6 +93,27 @@ def _normalize_color(value: Any, fallback: str) -> str:
     return fallback
 
 
+def _has_valid_segment_endpoints(body: dict[str, Any]) -> bool:
+    """Return whether a planner supplied two usable, distinct segment endpoints."""
+
+    def valid_point(value: Any) -> bool:
+        return (
+            isinstance(value, (list, tuple))
+            and len(value) == 2
+            and all(
+                isinstance(component, (int, float))
+                and not isinstance(component, bool)
+                and math.isfinite(float(component))
+                and abs(float(component)) <= MAX_COORDINATE
+                for component in value
+            )
+        )
+
+    point_a = body.get("pointA", body.get("point_a"))
+    point_b = body.get("pointB", body.get("point_b"))
+    return valid_point(point_a) and valid_point(point_b) and tuple(point_a) != tuple(point_b)
+
+
 def repair_scene_data(raw: dict[str, Any]) -> dict[str, Any]:
     """Apply only deterministic, semantics-preserving repairs before validation."""
 
@@ -113,6 +136,12 @@ def repair_scene_data(raw: dict[str, Any]) -> dict[str, Any]:
                     continue
                 if body.get("shape") == "segment":
                     body.setdefault("isStatic", body.pop("is_static", True))
+                    # Some planners describe a segment with endpoints and also
+                    # repeat its derived length. PhysicsObject accepts the
+                    # endpoints; once both are valid, dropping the redundant
+                    # value is deterministic and preserves the geometry.
+                    if _has_valid_segment_endpoints(body):
+                        body.pop("length", None)
         object_ids = [
             body["id"]
             for body in objects

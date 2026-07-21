@@ -101,6 +101,44 @@ class CompilerTests(unittest.TestCase):
         self.assertIn("floor", repaired["visual"]["objectStyles"])
         self.assertTrue(repaired["visual"]["trail"]["enabled"])
 
+    def test_safe_repair_removes_redundant_segment_length_only_with_valid_endpoints(self) -> None:
+        repaired = repair_scene_data(
+            {
+                "physics": {
+                    "duration": 3,
+                    "objects": [
+                        {
+                            "id": "ramp",
+                            "shape": "segment",
+                            "pointA": [-200, -100],
+                            "pointB": [200, 45.59],
+                            "length": 425.7,
+                        },
+                        {"id": "incomplete", "shape": "segment", "length": 300},
+                    ],
+                }
+            }
+        )
+        self.assertNotIn("length", repaired["physics"]["objects"][0])
+        self.assertEqual(repaired["physics"]["objects"][1]["length"], 300)
+        validated = repair_scene_data(
+            {
+                "physics": {
+                    "duration": 3,
+                    "objects": [
+                        {
+                            "id": "ramp",
+                            "shape": "segment",
+                            "pointA": [-200, -100],
+                            "pointB": [200, 45.59],
+                            "length": 425.7,
+                        }
+                    ],
+                }
+            }
+        )
+        SceneSpec.model_validate(validated)
+
     def test_safe_repair_normalizes_common_general_planner_aliases(self) -> None:
         repaired = repair_scene_data(
             {
@@ -213,6 +251,19 @@ class CompilerTests(unittest.TestCase):
         self.assertEqual(provider.calls, 2)
         self.assertIn("properties", provider.last_schema)
         self.assertEqual(scene.metadata.origin, "model")
+
+    def test_model_compiler_accepts_redundant_segment_length_without_retry(self) -> None:
+        planned = compile_template("ramp-friction", "a ball drops on a ramp", {}).contract_dump()
+        ramp = next(obj for obj in planned["physics"]["objects"] if obj["id"] == "ramp")
+        ramp["length"] = math.dist(ramp["pointA"], ramp["pointB"])
+        provider = FakeProvider([json.dumps(planned)])
+        scene = SceneCompiler(provider).compile(
+            CompileRequest(prompt="an unseen scene containing a ramp", prefer_template=False),
+            cancel_event=Event(),
+        )
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(scene.metadata.origin, "model")
+        self.assertEqual(next(obj for obj in scene.physics.objects if obj.id == "ramp").shape, "segment")
 
     def test_general_model_planner_is_default_and_knows_composable_force_fields(self) -> None:
         valid = compile_template("projectile-motion", "fallback", {}).contract_dump()

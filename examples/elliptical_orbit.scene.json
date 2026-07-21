@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "sceneId": "elliptical_orbit_composed",
+  "description": "A non-template inverse-square orbit composed from bodies, a force field, trails, and vectors.",
+  "physics": {
+    "gravity": [0, 0],
+    "duration": 10.5,
+    "dt": 0.004166666666666667,
+    "objects": [
+      {
+        "id": "sun",
+        "shape": "circle",
+        "radius": 26,
+        "position": [70, 0],
+        "mass": 1000,
+        "isStatic": true,
+        "inspectable": false,
+        "collisionGroup": 9
+      },
+      {
+        "id": "planet",
+        "shape": "circle",
+        "radius": 11,
+        "position": [196.5, 0],
+        "velocity": [0, 234.6444901758],
+        "mass": 1,
+        "friction": 0,
+        "restitution": 0,
+        "collisionGroup": 9
+      }
+    ],
+    "forceFields": [
+      {
+        "id": "solar-gravity",
+        "type": "inverseSquare",
+        "sources": ["sun"],
+        "targets": ["planet"],
+        "strength": 4803.3390699,
+        "direction": "attract",
+        "softening": 1,
+        "maxForce": 10000
+      }
+    ]
+  },
+  "visual": {
+    "sceneSize": [800, 500],
+    "units": "pixels",
+    "backgroundColor": "#07111F",
+    "title": "Elliptical motion from an inverse-square force field",
+    "camera": {"center": [-35, 0], "zoom": 1},
+    "trail": {"enabled": true, "maxPoints": 1000, "sampleEvery": 1, "fade": true},
+    "objectStyles": {
+      "sun": {"color": "#F5B700", "label": "Sun (focus)", "showLabel": true, "opacity": 1, "strokeWidth": 2},
+      "planet": {"color": "#53B1FD", "label": "planet", "showLabel": false, "opacity": 1, "strokeWidth": 2}
+    },
+    "overlays": [
+      {
+        "id": "velocity",
+        "kind": "vector",
+        "targetId": "planet",
+        "label": "velocity",
+        "color": "#32D583",
+        "data": {"source": "velocity", "scale": 0.18, "labelDirection": "right", "labelOffset": [0.16, 0.14], "fontSize": 14, "maxScreenLength": 1.2, "startTime": 0.3, "fadeDuration": 0.4}
+      },
+      {
+        "id": "gravity-vector",
+        "kind": "vector",
+        "targetId": "planet",
+        "label": "gravity",
+        "color": "#F97066",
+        "data": {"source": "force", "scale": 0.16, "labelDirection": "left", "labelOffset": [-0.16, -0.15], "fontSize": 14, "maxScreenLength": 1.2, "startTime": 0.3, "fadeDuration": 0.4}
+      },
+      {
+        "id": "law",
+        "kind": "equation",
+        "label": "Inverse-square gravity  •  F = GMm/r²\nPymunk integrates the changing force every step",
+        "color": "#F2F4F7",
+        "data": {"screenPosition": "bottomRight", "panel": true, "fontSize": 20, "startTime": 0.8, "fadeDuration": 0.5}
+      }
+    ]
+  },
+  "metadata": {"origin": "provided"}
+}

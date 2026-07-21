@@ -141,11 +141,7 @@ Output:
 dist\prompt-animator\prompt-animator.exe
 ```
 
-The build script bundles the FFmpeg selected by `-FfmpegPath`, `MOTIONFORGE_FFMPEG`, or the current `PATH`. At runtime MotionForge checks the bundled resource, the executable directory, `MOTIONFORGE_FFMPEG`, then `PATH`. Build separately on each target OS/architecture; PyInstaller artifacts are not cross-platform.
-
-```powershell
-.\scripts\build.ps1 -FfmpegPath C:\ffmpeg\bin\ffmpeg.exe
-```
+The build does not bundle FFmpeg. Interactive timeline visualization works without it. MP4 export requires FFmpeg to be supplied separately through `MOTIONFORGE_FFMPEG`, an adjacent `resources/ffmpeg` directory, or the system `PATH`. Build separately on each target OS/architecture; PyInstaller artifacts are not cross-platform.
 
 Point the current Velo legacy backend at the onedir executable while it migrates to the sidecar contract:
 
